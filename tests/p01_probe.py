@@ -9,6 +9,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib.util
+import os
+import stat
+from contextlib import contextmanager
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +27,7 @@ _ALLOWED_WITNESS_SOURCES = frozenset({
     'document_digest', 'http_test_server', 'offnode_stub', 'controlled_disk_fault',
     'durable_journal', 'git_history_refs', 'secret_scanner_report', 'ci_runner_exit',
     'redacted_error_log', 'os_syscall_trace', 'supervisor_inventory_metadata',
-    'outbound_call_counter',
+    'outbound_call_counter', 'execve_trace',
 })
 
 # Normative checks are independent of the fixture file. A snapshot digest in
@@ -487,10 +490,25 @@ def verify_immutable_sut_checkout(repo: Path, expected_sha: str, argv: list[str]
     if not argv or not Path(argv[0]).is_absolute():
         raise ProbeError('NOT_CHECKED: SUT executable must be absolute')
     executable=Path(argv[0])
-    if str(executable.resolve(strict=True)) not in approved_components_sha256:
+    # NINTH-D5-041: a verified symlink target can change before Popen.
+    if executable.is_symlink():
+        raise ProbeError('NOT_CHECKED: SUT executable symlink is not a pinned execution object')
+    executable_name=str(executable.resolve(strict=True))
+    if executable_name not in approved_components_sha256:
         raise ProbeError('NOT_CHECKED: SUT executable missing from signed closure')
-    if approved_components_sha256[str(executable.resolve())]!=approved_executable_sha256:
+    if approved_components_sha256[executable_name]!=approved_executable_sha256:
         raise ProbeError('NOT_CHECKED: executable digest differs from signed policy')
+    # NINTH-D5-040: validate ALL signed bytes before any interpreter probe.
+    # Neither a plausible "cpython" string nor probe exit zero is proof of identity.
+    for name, sha in approved_components_sha256.items():
+        component=Path(name)
+        try:
+            if (not component.is_absolute() or component.is_symlink() or
+                    not component.is_file() or str(component.resolve()) != name or
+                    hashlib.sha256(component.read_bytes()).hexdigest()!=sha):
+                raise ProbeError('NOT_CHECKED: executable/script/import bytes differ from signed closure')
+        except (OSError, ValueError) as exc:
+            raise ProbeError('NOT_CHECKED: cannot verify executable bytes before execution') from exc
     # SEVENTH-REVIEW-039: NEVER infer authority to execute a second component
     # from the name/hash of the first one. The OWNER-signed policy binds an
     # *explicit* launch mode. Unknown launch chains are NOT_CHECKED.
@@ -514,27 +532,138 @@ def verify_immutable_sut_checkout(repo: Path, expected_sha: str, argv: list[str]
         script = Path(argv[1]); script_resolved = str(script.resolve(strict=True))
         if script.is_symlink() or script_resolved not in approved_components_sha256:
             raise ProbeError('NOT_CHECKED: Python script not in signed component manifest')
-        # A renamed env/dash/perl executable cannot claim to be a Python
-        # interpreter solely by selecting a signed string launch mode.
+        # Run any additional identity probe ONLY after digest verification and
+        # as an unprivileged probe user. The runner must never exec uncertain
+        # code under its own privileged identity.
         try:
-            identity=subprocess.run([str(executable), '-I','-S','-c',
-                'import sys; print(sys.implementation.name)'],
-                env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
-                capture_output=True,text=True,timeout=5,check=False)
+            import subprocess
+            if os.geteuid() == 0:
+                probe_user, probe_group = 65534, 65534
+                identity=subprocess.run([str(executable),'-I','-S','-c',
+                    'import sys; print(sys.implementation.name)'],
+                    env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+                    capture_output=True,text=True,timeout=5,check=False,
+                    user=probe_user,group=probe_group,extra_groups=[])
+            else:
+                identity=subprocess.run([str(executable),'-I','-S','-c',
+                    'import sys; print(sys.implementation.name)'],
+                    env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+                    capture_output=True,text=True,timeout=5,check=False)
         except (OSError,subprocess.SubprocessError) as exc:
-            raise ProbeError('NOT_CHECKED: pinned Python interpreter identity unavailable') from exc
-        if identity.returncode != 0 or identity.stdout.strip() != 'cpython':
-            raise ProbeError('NOT_CHECKED: signed Python launch mode is not a Python interpreter')
+            raise ProbeError('NOT_CHECKED: unprivileged pinned Python identity unavailable') from exc
+        if identity.returncode!=0 or identity.stdout.strip()!='cpython':
+            raise ProbeError('NOT_CHECKED: pinned interpreter is not CPython')
     else:
         raise ProbeError('NOT_CHECKED: no explicitly approved signed SUT launch mode')
-    # Other argv elements cannot be parsed/forwarded by wrapper processes:
-    # all launch-time script bytes above were checked against the signed map.
-    for name,sha in approved_components_sha256.items():
-        p=Path(name)
-        if (not p.is_absolute() or p.is_symlink() or not p.is_file() or
-                str(p.resolve()) != name or
-                hashlib.sha256(p.read_bytes()).hexdigest()!=sha):
-            raise ProbeError('NOT_CHECKED: executable/script/import bytes differ from signed closure')
+    # Full manifest hashes were checked BEFORE running any executable above.
+    # An accepted preflight is NOT an execution authorization by pathname;
+    # open_pinned_launch pins actual file descriptors for the real Popen.
+    return True
+
+
+@dataclass(frozen=True)
+class PinnedLaunch:
+    """Only file-descriptor-backed execution may follow successful admission."""
+    argv: tuple[str, ...]
+    executable: str
+    pass_fds: tuple[int, ...]
+
+
+@contextmanager
+def open_pinned_launch(argv: list[str], approved_components_sha256: dict[str,str], *,
+                       launch_mode: str):
+    """Pin checked executable and script inodes through O_NOFOLLOW file descriptors.
+
+    SUT never receives an executable selected by a mutable pathname. The signed
+    component manifest and trusted runner filesystem controls are prerequisites.
+    Full dynamic exec/import closure remains mandatory from independent OS audit.
+    """
+    if launch_mode not in ('direct_elf','pinned_python_script') or not argv:
+        raise ProbeError('NOT_CHECKED: unsupported pinned execution mode')
+    if (launch_mode=='direct_elf' and len(argv)!=1) or (
+            launch_mode=='pinned_python_script' and len(argv)!=2):
+        raise ProbeError('NOT_CHECKED: unpinned launch argument chain')
+    opened=[]
+    try:
+        for path_string in argv:
+            path=Path(path_string)
+            if not path.is_absolute() or path.is_symlink():
+                raise ProbeError('NOT_CHECKED: mutable executable/script link rejected')
+            canonical=str(path.resolve(strict=True))
+            if canonical not in approved_components_sha256:
+                raise ProbeError('NOT_CHECKED: opened runtime component not in owner manifest')
+            # Reject SUT-writable path components. Root-owned sticky /tmp may
+            # contain root-controlled private dirs, but a mutable ancestor below
+            # it must be rejected. SUT cannot change a root-owned sticky entry.
+            for ancestor in (path.parent, *path.parent.parents):
+                mode=ancestor.stat().st_mode
+                if ancestor.is_symlink() or (mode & 0o022 and not
+                        (ancestor.stat().st_uid==0 and mode & stat.S_ISVTX)):
+                    raise ProbeError('NOT_CHECKED: mutable runtime component directory')
+            fd=os.open(path, os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+            opened.append(fd)
+            fs=os.fstat(fd)
+            if not stat.S_ISREG(fs.st_mode) or fs.st_uid!=0 or fs.st_mode & 0o022:
+                raise ProbeError('NOT_CHECKED: runtime component writable/untrusted OS owner')
+            with os.fdopen(os.dup(fd),'rb') as file:
+                sha=hashlib.file_digest(file,'sha256').hexdigest()
+            fs_after=os.fstat(fd)
+            if (sha!=approved_components_sha256[canonical] or
+                    (fs.st_dev,fs.st_ino,fs.st_size,fs.st_mtime_ns)!=
+                    (fs_after.st_dev,fs_after.st_ino,fs_after.st_size,fs_after.st_mtime_ns)):
+                raise ProbeError('NOT_CHECKED: runtime inode bytes differ from approved SHA')
+        if launch_mode=='direct_elf':
+            if os.pread(opened[0],4,0)!=b'\x7fELF':
+                raise ProbeError('NOT_CHECKED: pinned direct mode is not ELF')
+        # /proc/self/fd/N is resolved in the CHILD, while the inherited FD pins
+        # the inode. Repointing argv[0] after this point cannot change exec.
+        proc_argv=tuple(f'/proc/self/fd/{fd}' for fd in opened)
+        yield PinnedLaunch(proc_argv,proc_argv[0],tuple(opened))
+    except (OSError,ValueError) as exc:
+        raise ProbeError('NOT_CHECKED: cannot pin immutable executable inode') from exc
+    finally:
+        for fd in opened:
+            os.close(fd)
+
+
+def verify_execution_closure(capture: dict[str,Any], *,
+                             approved_components_sha256: dict[str,str],
+                             process_pids: tuple[int,...]) -> bool:
+    """Global mandatory OS exec/import-trace gate before ANY P01 runtime PASS.
+
+    The capture MUST originate from an authenticated independent kernel/audit
+    collector. A SUT-controlled dict or an uninstalled monitor cannot satisfy
+    the witness/provenance checks of verify_independent_proofs.
+    """
+    if (not isinstance(capture,dict) or capture.get('trace_source')!='kernel_execve' or
+            capture.get('trace_complete') is not True or
+            capture.get('monitor_installed_outside_sut') is not True or
+            capture.get('coverage_start_before_first_exec') is not True or
+            capture.get('coverage_end_after_last_child_exit') is not True or
+            capture.get('all_descendants_exited') is not True or
+            type(capture.get('kernel_event_drops')) is not int or
+            capture['kernel_event_drops']!=0 or
+            capture.get('unobserved_executable_memory')!=0 or
+            capture.get('unmonitored_dynamic_loads')!=0):
+        raise ProbeError('NOT_CHECKED: independent complete kernel process trace missing')
+    events=capture.get('execve_events')
+    loads=capture.get('loaded_file_events')
+    observed_pids=capture.get('observed_pids')
+    if (not process_pids or not isinstance(events,list) or not events or not isinstance(loads,list) or
+            not isinstance(observed_pids,list) or not observed_pids or
+            any(type(p) is not int or p<=0 for p in observed_pids) or
+            set(process_pids)-set(observed_pids)):
+        raise ProbeError('NOT_CHECKED: missing complete tracked process ancestry')
+    if {e.get('pid') for e in events if isinstance(e,dict)}!=set(observed_pids):
+        raise ProbeError('NOT_CHECKED: observed descendants lack execve events')
+    if not isinstance(approved_components_sha256,dict) or not approved_components_sha256:
+        raise ProbeError('NOT_CHECKED: signed runtime component closure missing')
+    for event in events+loads:
+        if (not isinstance(event,dict) or not isinstance(event.get('executable_path'),str) or
+                event['executable_path'] not in approved_components_sha256 or
+                not isinstance(event.get('executable_sha256'),str) or
+                approved_components_sha256[event['executable_path']]!=event['executable_sha256']):
+            raise ProbeError('NOT_CHECKED: unsigned descendant exec/import component')
     return True
 
 

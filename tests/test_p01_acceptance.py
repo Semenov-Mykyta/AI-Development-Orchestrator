@@ -18,7 +18,8 @@ from p01_probe import (ProbeError, TestRun, collect_trusted_evidence,
                        load_externally_approved_runner_policy, require_witness_key_isolation,
                        verify_sut_proc_identity, verify_immutable_sut_checkout,
                        materialize_synthetic_objects, require_preexisting_synthetic_sentinel,
-                       require_sut_synthetic_evidence_access)
+                       require_sut_synthetic_evidence_access, open_pinned_launch,
+                       verify_execution_closure)
 
 ORACLE = Path(__file__).resolve().parent / 'fixtures' / 'p01' / 'P01_ORACLES.json'
 ITEMS = json.loads(ORACLE.read_text('utf8'))['items']
@@ -89,7 +90,7 @@ def approved_test_subprocess():
     trusted_git_mirror=Path(policy['git_scan_mirror_path'])
     if trusted_git_mirror.resolve().is_relative_to(Path(repo).resolve()):
         pytest.fail('NOT_CHECKED: test Git remote inside SUT checkout',pytrace=False)
-    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid, trusted_git_mirror, Path(policy['synthetic_root_path']), policy['git_test_remote_url']
+    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid, trusted_git_mirror, Path(policy['synthetic_root_path']), policy['git_test_remote_url'], policy['sut_components_sha256'], policy['sut_launch_mode']
 
 
 
@@ -110,7 +111,7 @@ def build_p01_test_run(*, pids, codes, start_ticks, argv, raw, workspace, git_sh
 @pytest.mark.parametrize('ac_id,case', TEST_CASES,
                          ids=[f'{ac}:{s["scenario_id"]}' for ac,s in TEST_CASES])
 def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
-    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid, trusted_git_mirror, synthetic_root, trusted_remote_url = approved_test_subprocess
+    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid, trusted_git_mirror, synthetic_root, trusted_remote_url, approved_components, approved_launch_mode = approved_test_subprocess
     with tempfile.TemporaryDirectory(prefix='aio-p01-synthetic-') as scratch:
         scratch_path = Path(scratch)
         workspace = scratch_path / 'workspace'
@@ -141,40 +142,54 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
         # operating on the SAME persisted workspace, not a fictitious count.
         steps = raw.get('sequence') or [raw]
         pids, codes, start_ticks = [], [], 0
-        for step in steps:
-            fixture = workspace / f'input-{len(pids)}.json'
-            fixture.write_bytes(_canonical(step))
-            process = subprocess.Popen(argv + [str(fixture)], cwd=workspace, env=env,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       user=sut_uid, group=sut_gid, extra_groups=[],
-                                       start_new_session=True)
-            try:
-                start_ticks = _start_ticks(process.pid)
-                status = Path(f'/proc/{process.pid}/status').read_text()
+        # Each Popen executes pinned file descriptors, never pathnames
+        # subject to symlink swap or post-check rename.
+        with open_pinned_launch(argv,approved_components,launch_mode=approved_launch_mode) as pinned:
+            for step in steps:
+                fixture = workspace / f'input-{len(pids)}.json'
+                fixture.write_bytes(_canonical(step))
+                process = subprocess.Popen(list(pinned.argv) + [str(fixture)],
+                                           executable=pinned.executable,pass_fds=pinned.pass_fds,
+                                           cwd=workspace, env=env,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           user=sut_uid, group=sut_gid, extra_groups=[],
+                                           start_new_session=True)
                 try:
-                    verify_sut_proc_identity(status, sut_uid=sut_uid, sut_gid=sut_gid, runner_uid=os.geteuid())
-                except ProbeError as exc:
-                    process.kill(); process.wait()
-                    pytest.fail(str(exc),pytrace=False)
-                process.communicate(timeout=30)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.communicate()
-                pytest.fail('NOT_CHECKED: P01 synthetic subprocess timed out', pytrace=False)
-            pids.append(process.pid)
-            codes.append(process.returncode)
+                    start_ticks = _start_ticks(process.pid)
+                    status = Path(f'/proc/{process.pid}/status').read_text()
+                    try:
+                        verify_sut_proc_identity(status, sut_uid=sut_uid, sut_gid=sut_gid, runner_uid=os.geteuid())
+                    except ProbeError as exc:
+                        process.kill(); process.wait()
+                        pytest.fail(str(exc),pytrace=False)
+                    process.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+                    pytest.fail('NOT_CHECKED: P01 synthetic subprocess timed out', pytrace=False)
+                pids.append(process.pid)
+                codes.append(process.returncode)
         run = build_p01_test_run(pids=pids,codes=codes,start_ticks=start_ticks,argv=argv,
                                   raw=raw,workspace=workspace,git_sha=git_sha,
                                   collector_sha=collector_sha,trusted_git_mirror=trusted_git_mirror,
                                   trusted_remote_url=trusted_remote_url)
-        sources = [p['source'] for p in case['independent_proofs']]
+        # NINTH-D5-042: every one of the 63 acceptance scenarios requires an
+        # independently authenticated complete execve + load closure witness,
+        # regardless of whether the per-AC JSON lists subprocess_audit.
+        sources = list(dict.fromkeys([p['source'] for p in case['independent_proofs']] + ['execve_trace']))
+        required_case = {**case, 'independent_proofs': [*case['independent_proofs'],
+                              *([] if 'execve_trace' in [p['source'] for p in case['independent_proofs']]
+                                else [{'source':'execve_trace','required':True}])]}
         try:
             evidence = collect_trusted_evidence(synthetic_input=raw, required_sources=sources,
                                                 run=run, collector_file=collector,
                                                 collector_sha256=collector_sha, witness_key=witness_key, sut_uid=sut_uid)
-            verify_independent_proofs(case, {}, evidence, run,
+            verify_independent_proofs(required_case, {}, evidence, run,
                                       trusted_witness_key=witness_key,
                                       expected_git_sha=git_sha, expected_command_digest=run.command_digest,
                                       expected_collector_sha256=collector_sha)
+            verify_execution_closure(evidence['execve_trace'].captures,
+                                     approved_components_sha256=approved_components,
+                                     process_pids=tuple(pids))
         except ProbeError as exc:
             pytest.fail(str(exc), pytrace=False)
