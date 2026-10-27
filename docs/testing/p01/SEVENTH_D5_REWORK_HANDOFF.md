@@ -23,3 +23,7 @@
 - Verify the new runner-side OS access probe and no trust leakage to SUT workspace, and check no root-owned protected SUT fixture yields a spurious PASS.
 - Verify all 27 AC/methods/63 scenarios, exact immutable base, no false PASS in independent collectors.
 - Validate the exact remote HEAD on PR #1 before verdict. These local checks do **not** establish real collector provenance, OQ-09/A isolation, owner trust root/manifest, CI/OS/Git negative proofs or runtime AC PASS. `P01 = NOT_COMPLETED`; `P02 = BLOCKED`; no merge/deploy.
+
+## PR head synchronization check
+
+Independent Reviewer must verify **both** the live branch ref and PR #1 API head SHA are identical before reviewing the PR. If the PR diff/metadata is stale, verdict is `BLOCKED` until synchronized; a matching feature ref alone does not authenticate the PR snapshot.
