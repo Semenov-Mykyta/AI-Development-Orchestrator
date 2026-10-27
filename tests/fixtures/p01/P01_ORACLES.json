@@ -58,7 +58,8 @@
           "scenario_id": "same-idempotency-key-again",
           "synthetic_input_only": true,
           "expected_observations": {
-            "project_count": 1
+            "project_count": 1,
+            "registration_command_executions": 2
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -69,12 +70,43 @@
               "https://git.test.invalid/approved/demo.git"
             ],
             "idempotency_key": "reg-1",
-            "prior_submission_count": 1,
             "documents": [
               "SPEC.md",
               "AGENTS.md",
               "IMPLEMENTATION_PLAN.md",
               "ARCHITECTURE.md"
+            ],
+            "sequence": [
+              {
+                "operation": "register_project",
+                "url": "https://git.test.invalid/approved/demo.git",
+                "owner_actor": "synthetic-owner-001",
+                "allowlist": [
+                  "https://git.test.invalid/approved/demo.git"
+                ],
+                "idempotency_key": "reg-1",
+                "documents": [
+                  "SPEC.md",
+                  "AGENTS.md",
+                  "IMPLEMENTATION_PLAN.md",
+                  "ARCHITECTURE.md"
+                ]
+              },
+              {
+                "operation": "register_project",
+                "url": "https://git.test.invalid/approved/demo.git",
+                "owner_actor": "synthetic-owner-001",
+                "allowlist": [
+                  "https://git.test.invalid/approved/demo.git"
+                ],
+                "idempotency_key": "reg-1",
+                "documents": [
+                  "SPEC.md",
+                  "AGENTS.md",
+                  "IMPLEMENTATION_PLAN.md",
+                  "ARCHITECTURE.md"
+                ]
+              }
             ]
           },
           "independent_proofs": [
@@ -1021,7 +1053,8 @@
           "expected_observations": {
             "expired_own_logs_removed": true,
             "protected_records_unchanged": true,
-            "foreign_paths_modified": 0
+            "foreign_paths_modified": 0,
+            "owned_logs_older_than_ttl_after": 0
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -1074,7 +1107,12 @@
           "synthetic_input_only": true,
           "expected_observations": {
             "protected_records_unchanged": true,
-            "foreign_paths_modified": 0
+            "foreign_paths_modified": 0,
+            "owned_log_bytes_after": {
+              "op": "at_most",
+              "value": 134217728
+            },
+            "log_quota_enforced": true
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -1353,8 +1391,9 @@
           "expected_observations": {
             "remote_write_calls": 0,
             "ack_calls": 0,
-            "journal_state": "FAIL_CLOSED",
-            "intent_durable_before_write": false
+            "intent_durable_before_write": false,
+            "system_mode": "FAIL_CLOSED",
+            "journal_record_created": false
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -1407,7 +1446,9 @@
             "duplicate_remote_writes_after_restart": 0,
             "fail_closed": true,
             "journal_state": "UNCERTAIN",
-            "intent_durable_before_write": true
+            "intent_durable_before_write": true,
+            "remote_writes_before_restart": 1,
+            "remote_writes_total_after_restart": 1
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2259,7 +2300,10 @@
           "synthetic_input_only": true,
           "expected_observations": {
             "os_denied": true,
-            "test_runtime_isolated": true
+            "test_runtime_isolated": true,
+            "actual_errno": "EACCES",
+            "actual_syscall": "read",
+            "denied_target": "/synthetic/supervisor-only/sentinel"
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2296,7 +2340,10 @@
           "synthetic_input_only": true,
           "expected_observations": {
             "os_denied": true,
-            "test_runtime_isolated": true
+            "test_runtime_isolated": true,
+            "actual_errno": "EACCES",
+            "actual_syscall": "read",
+            "denied_target": "/synthetic/production-namespace/sentinel"
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2333,7 +2380,10 @@
           "synthetic_input_only": true,
           "expected_observations": {
             "os_denied": true,
-            "test_runtime_isolated": true
+            "test_runtime_isolated": true,
+            "actual_errno": "ENETUNREACH",
+            "actual_syscall": "connect",
+            "denied_target": "203.0.113.10:8443"
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2462,7 +2512,8 @@
           "scenario_id": "exactly-next-due",
           "synthetic_input_only": true,
           "expected_observations": {
-            "decision": "DENY"
+            "decision": "DENY",
+            "outbound_calls": 0
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2504,7 +2555,8 @@
           "scenario_id": "after-next-due",
           "synthetic_input_only": true,
           "expected_observations": {
-            "decision": "DENY"
+            "decision": "DENY",
+            "outbound_calls": 0
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2546,7 +2598,8 @@
           "scenario_id": "missing-last-rotated",
           "synthetic_input_only": true,
           "expected_observations": {
-            "decision": "DENY"
+            "decision": "DENY",
+            "outbound_calls": 0
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2588,7 +2641,8 @@
           "scenario_id": "missing-next-due",
           "synthetic_input_only": true,
           "expected_observations": {
-            "decision": "DENY"
+            "decision": "DENY",
+            "outbound_calls": 0
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2630,7 +2684,8 @@
           "scenario_id": "provider-expiry-comes-first",
           "synthetic_input_only": true,
           "expected_observations": {
-            "decision": "DENY"
+            "decision": "DENY",
+            "outbound_calls": 0
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2673,7 +2728,8 @@
           "scenario_id": "revoked-or-compromised",
           "synthetic_input_only": true,
           "expected_observations": {
-            "decision": "DENY"
+            "decision": "DENY",
+            "outbound_calls": 0
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2715,7 +2771,8 @@
           "scenario_id": "old-ref-after-replacement",
           "synthetic_input_only": true,
           "expected_observations": {
-            "decision": "DENY"
+            "decision": "DENY",
+            "outbound_calls": 0
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {

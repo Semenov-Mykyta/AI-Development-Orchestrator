@@ -1,9 +1,7 @@
-"""P01 pre-implementation D5 test oracle. Never derives PASS from SUT reports.
+"""P01 D5 synthetic acceptance driver: does not implement P01 or generate fake PASS.
 
-Accepted execution is a real isolated test-only subprocess plus independently
-witnessed effects. The OS/CI/Git-specific witness collectors do NOT yet exist;
-therefore the acceptance suite remains NOT_CHECKED until they are reviewed and
-wired to a real P01 implementation in an OQ-09/A sandbox. This is intentional.
+Launch SUT only in separately approved OQ-09/A sandbox with an independently
+hash-pinned trusted collector. Unit-verifier fixtures never imply SUT evidence.
 """
 import hashlib
 import json
@@ -12,64 +10,107 @@ from pathlib import Path
 import shlex
 import subprocess
 import tempfile
+import uuid
 
 import pytest
-from p01_probe import ProbeError, TestRun, verify_independent_proofs, verify_normative_expectations
+from p01_probe import (ProbeError, TestRun, collect_trusted_evidence,
+                       verify_independent_proofs, verify_normative_expectations, _canonical)
 
 ORACLE = Path(__file__).resolve().parent / 'fixtures' / 'p01' / 'P01_ORACLES.json'
-ITEMS = json.loads(ORACLE.read_text(encoding='utf-8'))['items']
+ITEMS = json.loads(ORACLE.read_text('utf8'))['items']
 verify_normative_expectations(ITEMS)
 TEST_CASES = [(r['ac_id'], s) for r in ITEMS if r['auto_test_required'] for s in r['scenarios']]
 
 
-def canonical(value):
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf8')
+def _start_ticks(pid: int) -> int:
+    """Linux /proc starttime read while child is alive to prevent PID-only binding."""
+    try:
+        return int(Path(f'/proc/{pid}/stat').read_text('utf8').rsplit(')', 1)[1].split()[19])
+    except (OSError, IndexError, ValueError) as exc:
+        raise ProbeError('NOT_CHECKED: no OS process starttime') from exc
 
 
 @pytest.fixture(scope='session')
 def approved_test_subprocess():
-    """Command to exercise real P01 SUT; not an observer returning expected JSON."""
     command = os.environ.get('AIO_P01_SUT_COMMAND')
-    if not command:
-        pytest.fail('NOT_CHECKED: no real P01 command wired to OQ-09/A isolated runner', pytrace=False)
+    repo = os.environ.get('AIO_P01_SUT_REPO')
+    git_sha = os.environ.get('AIO_P01_APPROVED_SUT_SHA')
+    collector = os.environ.get('AIO_P01_APPROVED_COLLECTOR')
+    digest = os.environ.get('AIO_P01_APPROVED_COLLECTOR_SHA256')
+    keypath = os.environ.get('AIO_P01_TRUSTED_WITNESS_KEY_PATH')
+    if not all((command, repo, git_sha, collector, digest, keypath)):
+        pytest.fail('NOT_CHECKED: SUT SHA/runner/collector/witness key not approved', pytrace=False)
     argv = shlex.split(command)
-    if not argv or not Path(argv[0]).is_absolute():
-        pytest.fail('NOT_CHECKED: SUT binary must be an explicitly approved absolute executable', pytrace=False)
-    if not Path(argv[0]).is_file():
-        pytest.fail('NOT_CHECKED: approved SUT binary does not exist', pytrace=False)
-    return argv
+    if not argv or not Path(argv[0]).is_absolute() or not Path(argv[0]).is_file():
+        pytest.fail('NOT_CHECKED: invalid approved absolute SUT binary', pytrace=False)
+    if len(git_sha) != 40:
+        pytest.fail('NOT_CHECKED: exact approved Git HEAD SHA required', pytrace=False)
+    try:
+        actual_git = subprocess.run(['git', '-C', repo, 'rev-parse', 'HEAD'],
+                                    capture_output=True, check=True, timeout=5, text=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pytest.fail('NOT_CHECKED: cannot independently inspect checked out SUT HEAD', pytrace=False)
+    if actual_git != git_sha:
+        pytest.fail('NOT_CHECKED: Git HEAD does not match approved SUT SHA', pytrace=False)
+    # Collector and witness key belong to a different trust domain from SUT.
+    for secure_path in (collector, keypath):
+        if Path(secure_path).resolve().is_relative_to(Path(repo).resolve()):
+            pytest.fail('NOT_CHECKED: trust material inside SUT checkout', pytrace=False)
+    try:
+        key = Path(keypath).read_bytes()
+    except OSError:
+        pytest.fail('NOT_CHECKED: runner-only witness key unavailable', pytrace=False)
+    if len(key) < 32:
+        pytest.fail('NOT_CHECKED: weak/absent witness key', pytrace=False)
+    if Path(keypath).stat().st_mode & 0o077:
+        pytest.fail('NOT_CHECKED: witness key accessible outside owner', pytrace=False)
+    return argv, git_sha, Path(collector), digest, key
 
 
 @pytest.mark.parametrize('ac_id,case', TEST_CASES,
                          ids=[f'{ac}:{s["scenario_id"]}' for ac,s in TEST_CASES])
 def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
-    """Request exercise -> independent probes -> assert actual effects (never stdout)."""
+    argv, git_sha, collector, collector_sha, witness_key = approved_test_subprocess
     with tempfile.TemporaryDirectory(prefix='aio-p01-synthetic-') as scratch:
         scratch_path = Path(scratch)
         workspace = scratch_path / 'workspace'
-        workspace.mkdir()
-        fixture_path = workspace / 'input.json'
-        fixture_path.write_bytes(canonical(case['synthetic_input']))
-        # Do not inherit production or supervisor credentials. Minimal, static env.
-        env = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'AIO_TEST_ONLY': '1',
-               'HOME': str(workspace), 'TMPDIR': str(workspace)}
-        process = subprocess.Popen(approved_test_subprocess + [str(fixture_path)],
-                                   cwd=workspace, env=env,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        workspace.mkdir(mode=0o700)
+        env = {'PATH':'/usr/bin:/bin', 'LANG':'C.UTF-8', 'AIO_TEST_ONLY':'1',
+               'HOME':str(workspace), 'TMPDIR':str(workspace)}
+        raw = case['synthetic_input']
+        # NEW-D5-017: a repeated registration is two actual subprocess calls
+        # operating on the SAME persisted workspace, not a fictitious count.
+        steps = raw.get('sequence') or [raw]
+        pids, codes, start_ticks = [], [], 0
+        for step in steps:
+            fixture = workspace / f'input-{len(pids)}.json'
+            fixture.write_bytes(_canonical(step))
+            process = subprocess.Popen(argv + [str(fixture)], cwd=workspace, env=env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                start_ticks = _start_ticks(process.pid)
+                process.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                pytest.fail('NOT_CHECKED: P01 synthetic subprocess timed out', pytrace=False)
+            pids.append(process.pid)
+            codes.append(process.returncode)
+        run = TestRun(pid=pids[-1], returncode=codes[-1],
+                      command_digest=hashlib.sha256(_canonical(argv)).hexdigest(),
+                      fixture_digest=hashlib.sha256(_canonical(raw)).hexdigest(),
+                      workspace=workspace, git_sha=git_sha, run_id=str(uuid.uuid4()),
+                      process_start_ticks=start_ticks,
+                      process_pids=tuple(pids), returncodes=tuple(codes),
+                      collector_sha256=collector_sha)
+        sources = [p['source'] for p in case['independent_proofs']]
         try:
-            _out, _err = process.communicate(timeout=30)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate()
-            pytest.fail("NOT_CHECKED: P01 synthetic SUT process timed out", pytrace=False)
-        run = TestRun(pid=process.pid,
-                      returncode=process.returncode,
-                      command_digest=hashlib.sha256(canonical(approved_test_subprocess)).hexdigest(),
-                      fixture_digest=hashlib.sha256(fixture_path.read_bytes()).hexdigest(),
-                      workspace=workspace)
-        # No trustworthy witness collector is yet implemented or authorized.
-        # Never synthesize evidence by copying the JSON oracle, stdout or stderr.
-        try:
-            verify_independent_proofs(case, {}, {}, run)
+            evidence = collect_trusted_evidence(synthetic_input=raw, required_sources=sources,
+                                                run=run, collector_file=collector,
+                                                collector_sha256=collector_sha, witness_key=witness_key)
+            verify_independent_proofs(case, {}, evidence, run,
+                                      trusted_witness_key=witness_key,
+                                      expected_git_sha=git_sha, expected_command_digest=run.command_digest,
+                                      expected_collector_sha256=collector_sha)
         except ProbeError as exc:
             pytest.fail(str(exc), pytrace=False)

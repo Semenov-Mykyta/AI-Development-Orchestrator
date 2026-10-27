@@ -27,3 +27,7 @@ A runner collector cannot be marked trusted by SUT claiming that it ran: review 
 ## Git and approvals
 
 Changes must remain on `feature/REQ-N-12-p01-d5-oracles`, PR #1, without touching `main` or seven normative documents. Independent Reviewer must re-review **new exact SHA**, fixture content, all findings and evidence. This PR was authored by the owner account, and is never `AC-N-SEC-05.3` owner bootstrap PR. Do not merge/deploy or begin P01 implementation without gates.
+
+## Second-review follow-up
+
+A second independent review of SHA `659255f5a6ac1c0c8151cd3814c9f5ab528323b5` returned CHANGES_REQUIRED with eight additional defects `NEW-D5-010…017`. The new changes, executed local test results, exact provenance limitations and re-review instructions are documented in `SECOND_D5_REWORK_HANDOFF.md`. The original nine-finding record above is retained as review history, not as a current assertion of PASS.
