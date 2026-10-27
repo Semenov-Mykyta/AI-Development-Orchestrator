@@ -14,7 +14,8 @@ import uuid
 
 import pytest
 from p01_probe import (ProbeError, TestRun, collect_trusted_evidence,
-                       verify_independent_proofs, verify_normative_expectations, _canonical)
+                       verify_independent_proofs, verify_normative_expectations, _canonical,
+                       load_externally_approved_runner_policy, require_witness_key_isolation)
 
 ORACLE = Path(__file__).resolve().parent / 'fixtures' / 'p01' / 'P01_ORACLES.json'
 ITEMS = json.loads(ORACLE.read_text('utf8'))['items']
@@ -35,12 +36,24 @@ def approved_test_subprocess():
     command = os.environ.get('AIO_P01_SUT_COMMAND')
     repo = os.environ.get('AIO_P01_SUT_REPO')
     git_sha = os.environ.get('AIO_P01_APPROVED_SUT_SHA')
-    collector = os.environ.get('AIO_P01_APPROVED_COLLECTOR')
-    digest = os.environ.get('AIO_P01_APPROVED_COLLECTOR_SHA256')
-    keypath = os.environ.get('AIO_P01_TRUSTED_WITNESS_KEY_PATH')
-    if not all((command, repo, git_sha, collector, digest, keypath)):
-        pytest.fail('NOT_CHECKED: SUT SHA/runner/collector/witness key not approved', pytrace=False)
+    if not all((command, repo, git_sha)):
+        pytest.fail('NOT_CHECKED: SUT SHA and runner not approved', pytrace=False)
+    try:
+        policy = load_externally_approved_runner_policy(git_sha=git_sha)
+        collector=policy['collector_path']
+        digest=policy['collector_sha256']
+        keypath=policy['witness_key_path']
+        sut_uid,sut_gid=policy['sut_uid'],policy['sut_gid']
+        if policy['runner_uid']!=os.geteuid():
+            raise ProbeError('NOT_CHECKED: runner OS identity not approved')
+        # Only a successful REAL denied syscall qualifies as a key isolation proof.
+        require_witness_key_isolation(Path(keypath),sut_uid=sut_uid,sut_gid=sut_gid)
+    except (ProbeError, OSError) as exc:
+        pytest.fail(str(exc),pytrace=False)
     argv = shlex.split(command)
+    if (hashlib.sha256(_canonical(argv)).hexdigest()!=policy['sut_command_sha256'] or
+            str(Path(repo).resolve())!=policy['sut_repo_path']):
+        pytest.fail('NOT_CHECKED: SUT command/repo not approved in signed policy',pytrace=False)
     if not argv or not Path(argv[0]).is_absolute() or not Path(argv[0]).is_file():
         pytest.fail('NOT_CHECKED: invalid approved absolute SUT binary', pytrace=False)
     if len(git_sha) != 40:
@@ -64,17 +77,24 @@ def approved_test_subprocess():
         pytest.fail('NOT_CHECKED: weak/absent witness key', pytrace=False)
     if Path(keypath).stat().st_mode & 0o077:
         pytest.fail('NOT_CHECKED: witness key accessible outside owner', pytrace=False)
-    return argv, git_sha, Path(collector), digest, key
+    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid
 
 
 @pytest.mark.parametrize('ac_id,case', TEST_CASES,
                          ids=[f'{ac}:{s["scenario_id"]}' for ac,s in TEST_CASES])
 def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
-    argv, git_sha, collector, collector_sha, witness_key = approved_test_subprocess
+    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid = approved_test_subprocess
     with tempfile.TemporaryDirectory(prefix='aio-p01-synthetic-') as scratch:
         scratch_path = Path(scratch)
         workspace = scratch_path / 'workspace'
         workspace.mkdir(mode=0o700)
+        # Only the separate, least-privileged SUT user can write the SUT sandbox;
+        # the root/runner-owned trusted_evidence sibling is not exposed to it.
+        try:
+            scratch_path.chmod(0o711)
+            os.chown(workspace, sut_uid, sut_gid)
+        except OSError:
+            pytest.fail('NOT_CHECKED: cannot isolate approved SUT workspace',pytrace=False)
         env = {'PATH':'/usr/bin:/bin', 'LANG':'C.UTF-8', 'AIO_TEST_ONLY':'1',
                'HOME':str(workspace), 'TMPDIR':str(workspace)}
         raw = case['synthetic_input']
@@ -86,9 +106,15 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
             fixture = workspace / f'input-{len(pids)}.json'
             fixture.write_bytes(_canonical(step))
             process = subprocess.Popen(argv + [str(fixture)], cwd=workspace, env=env,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       user=sut_uid, group=sut_gid)
             try:
                 start_ticks = _start_ticks(process.pid)
+                status = Path(f'/proc/{process.pid}/status').read_text()
+                actual_uid = int(next(l for l in status.splitlines() if l.startswith('Uid:')).split()[1])
+                if actual_uid != sut_uid or actual_uid == os.geteuid():
+                    process.kill(); process.wait()
+                    pytest.fail('NOT_CHECKED: SUT did not run as isolated approved UID',pytrace=False)
                 process.communicate(timeout=30)
             except subprocess.TimeoutExpired:
                 process.kill()

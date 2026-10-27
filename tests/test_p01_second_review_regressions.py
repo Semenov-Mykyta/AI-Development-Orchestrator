@@ -35,7 +35,8 @@ def test_new_d5_012_post_remote_fault_must_have_exactly_one_real_write():
     assert exp.get('remote_writes_total_after_restart') == 1
     assert exp.get('remote_writes_before_restart') == 1
     assert exp.get('duplicate_remote_writes_after_restart') == 0
-    assert exp.get('journal_state') == 'UNCERTAIN'
+    assert exp.get('journal_state_before_reconciliation') == 'UNCERTAIN'
+    assert exp.get('journal_state_after_reconciliation') == 'CONFIRMED'
 
 
 @pytest.mark.parametrize('scenario_id', ['forbidden-supervisor-path-os-denial','forbidden-production-namespace-os-denial','forbidden-network-endpoint-os-denial'])
@@ -59,7 +60,8 @@ def test_new_d5_015_acceptance_has_explicit_trusted_collector_hook():
     source=(ROOT/'test_p01_acceptance.py').read_text('utf-8')
     assert 'collect_trusted_evidence' in source
     assert 'verify_independent_proofs(case, {}, {}, run)' not in source
-    assert 'AIO_P01_APPROVED_COLLECTOR' in source
+    assert 'load_externally_approved_runner_policy' in source
+    assert 'AIO_P01_APPROVED_COLLECTOR' not in source
 
 
 def test_new_d5_016_proof_must_bind_sha_command_returncode_and_run_id(tmp_path):

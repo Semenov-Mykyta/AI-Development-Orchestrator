@@ -82,4 +82,4 @@ def test_d5_frozen_candidate_fixture_digest():
     import hashlib
     value=load()
     canonical=json.dumps(value['items'],sort_keys=True,ensure_ascii=False,separators=(',',':')).encode('utf8')
-    assert hashlib.sha256(canonical).hexdigest()=="6332fa0524b3b76e453cf76b5fa23a6a476166025f9265cc4cd829c17f12a737"
+    assert hashlib.sha256(canonical).hexdigest()=="3fdc1db718b8a75cdde1d12988f2832fa4f73c027546a1843fa4764a427d420d"

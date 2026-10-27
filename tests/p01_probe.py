@@ -47,13 +47,144 @@ _CRITICAL_EXPECTATIONS = {
     ('AC-ERR-03.2', 'full-fs-result-commit-after-remote-effect', 'remote_writes_before_restart'): 1,
     ('AC-ERR-03.2', 'full-fs-result-commit-after-remote-effect', 'remote_writes_total_after_restart'): 1,
     ('AC-ERR-03.2', 'full-fs-result-commit-after-remote-effect', 'ack_calls'): 0,
-    ('AC-ERR-03.2', 'full-fs-result-commit-after-remote-effect', 'journal_state'): 'UNCERTAIN',
     ('AC-N-SEC-05.5', 'exactly-next-due', 'decision'): 'DENY',
     ('AC-N-SEC-05.5', 'before-due-valid-scope', 'decision'): 'ALLOW',
     ('AC-N-SEC-05.5', 'new-ref-valid-scope', 'decision'): 'ALLOW',
     ('AC-N-SEC-05.5', 'provider-expiry-comes-first', 'decision'): 'DENY',
     ('AC-N-15.2', 'evidence-512MiB-without-offnode', 'reason'): 'ARTIFACT_QUOTA_BLOCKED',
+    ('AC-N-15.2', 'offnode-unavailable', 'protected_evidence_removed'): 0,
+    ('AC-ERR-03.2', 'full-fs-result-commit-after-remote-effect', 'journal_state_before_reconciliation'): 'UNCERTAIN',
+    ('AC-ERR-03.2', 'full-fs-result-commit-after-remote-effect', 'journal_state_after_reconciliation'): 'CONFIRMED',
+    ('AC-N-SEC-01.1', 'scan-current-tree-and-all-remote-branches', 'each_advertised_ref_sha_scanned'): True,
 }
+
+
+# Only an out-of-band, OWNER-AUTHENTICATED trust root is allowed to authorize
+# the collector in real acceptance.  These are fixed runner-side locations;
+# untrusted SUT/runtime environment variables cannot select an alternative key.
+OWNER_PUBLIC_KEY_PATH = Path('/etc/aio-orchestrator/trust/owner-ed25519.pub.pem')
+OWNER_SIGNED_POLICY_PATH = Path('/etc/aio-orchestrator/trust/p01-collector-policy.json')
+OWNER_POLICY_SIGNATURE_PATH = Path('/etc/aio-orchestrator/trust/p01-collector-policy.sig')
+
+
+def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owner_public_key: Path,
+                                   *, collector_file: Path, git_sha: str) -> dict[str, Any]:
+    """Authenticate approval with a separately provisioned owner public key.
+
+    Ownership/provisioning of the key is a separate owner-inspection requirement;
+    a caller-provided public key alone is NOT an authorization proof.
+    """
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        from cryptography.exceptions import InvalidSignature
+    except ImportError as exc:
+        raise ProbeError('NOT_CHECKED: required signature verifier unavailable') from exc
+    try:
+        key=load_pem_public_key(pinned_owner_public_key.read_bytes())
+        if not isinstance(key, Ed25519PublicKey):
+            raise ValueError('not Ed25519')
+        key.verify(signature, payload)
+    except (OSError, ValueError, InvalidSignature) as exc:
+        raise ProbeError('NOT_CHECKED: owner authority signature invalid') from exc
+    try:
+        data=json.loads(payload)
+    except ValueError as exc:
+        raise ProbeError('NOT_CHECKED: malformed signed policy') from exc
+    required={'schema','collector_sha256','collector_path','witness_key_path','git_sha',
+              'sut_uid','sut_gid','runner_uid','authorized_by','scope',
+              'sut_command_sha256','sut_repo_path'}
+    if not isinstance(data,dict) or not required <= set(data) or data['schema']!='aio.p01.owner_signed_collector_policy.v1':
+        raise ProbeError('NOT_CHECKED: incomplete signed collector policy')
+    if data['scope']!='P01-D5' or not data['authorized_by'] or data['git_sha']!=git_sha:
+        raise ProbeError('NOT_CHECKED: signed policy wrong scope, SHA or actor')
+    if data['collector_path']!=str(collector_file.resolve(strict=True)):
+        raise ProbeError('NOT_CHECKED: signed policy collector path mismatch')
+    if data['collector_sha256']!=_sha256(collector_file.read_bytes()):
+        raise ProbeError('NOT_CHECKED: signed policy collector digest mismatch')
+    for field in ('sut_uid','sut_gid','runner_uid'):
+        if type(data[field]) is not int or data[field]<0:
+            raise ProbeError('NOT_CHECKED: signed policy OS identity invalid')
+    if not isinstance(data['sut_command_sha256'],str) or len(data['sut_command_sha256'])!=64:
+        raise ProbeError('NOT_CHECKED: SUT command not pinned in signed policy')
+    if not Path(data['sut_repo_path']).is_absolute():
+        raise ProbeError('NOT_CHECKED: SUT checkout not pinned by signed policy')
+    if data['sut_uid']==data['runner_uid']:
+        raise ProbeError('NOT_CHECKED: signed policy selects same OS identity')
+    if not Path(data['witness_key_path']).is_absolute():
+        raise ProbeError('NOT_CHECKED: untrusted relative witness key path')
+    return data
+
+
+def load_externally_approved_runner_policy(*, git_sha: str) -> dict[str, Any]:
+    """Out-of-band root must be installed by OWNER; never choose it via env."""
+    trust_directory=OWNER_PUBLIC_KEY_PATH.parent
+    if (trust_directory!=OWNER_SIGNED_POLICY_PATH.parent or
+            trust_directory!=OWNER_POLICY_SIGNATURE_PATH.parent):
+        raise ProbeError('NOT_CHECKED: inconsistent approved trust directory')
+    for ancestor in (trust_directory, *list(trust_directory.parents)):
+        if ancestor.is_symlink() or ancestor.stat().st_uid!=0 or ancestor.stat().st_mode & 0o022:
+            raise ProbeError('NOT_CHECKED: trust root directory is not root-controlled')
+    for path in (OWNER_PUBLIC_KEY_PATH, OWNER_SIGNED_POLICY_PATH, OWNER_POLICY_SIGNATURE_PATH):
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_uid!=0 or path.stat().st_mode & 0o022:
+                raise ProbeError('NOT_CHECKED: untrusted owner policy filesystem permissions')
+        except OSError as exc:
+            raise ProbeError('NOT_CHECKED: owner policy trust root not provisioned') from exc
+    try:
+        payload=OWNER_SIGNED_POLICY_PATH.read_bytes()
+        signed=json.loads(payload)
+        collector_file=Path(signed['collector_path'])
+        signature=OWNER_POLICY_SIGNATURE_PATH.read_bytes()
+        return verify_signed_collector_policy(payload, signature, OWNER_PUBLIC_KEY_PATH,
+                                               collector_file=collector_file, git_sha=git_sha)
+    except (OSError, ValueError, KeyError) as exc:
+        raise ProbeError('NOT_CHECKED: authenticated owner collector approval missing') from exc
+
+
+def require_witness_key_isolation(key_path: Path, *, sut_uid: int, sut_gid: int) -> str:
+    """Real negative syscall executed as the SUT OS identity, with NO key value output.
+
+    Required before *every* acceptance run. Test-only uses a synthetic key.
+    If the runner cannot setuid to SUT, fail closed (never claim OS PASS).
+    """
+    import os
+    import subprocess
+    import sys
+    if sut_uid==os.geteuid() or sut_uid==key_path.stat().st_uid:
+        raise ProbeError('NOT_CHECKED: same OS identity, witness key not isolated')
+    if key_path.stat().st_mode & 0o077:
+        raise ProbeError('NOT_CHECKED: witness key permissions expose runner authority')
+    snippet=(
+        'import os,sys,errno; p=sys.argv[1]; '
+        'os.stat(p); '
+        '\ntry: fd=os.open(p,os.O_RDONLY)\n'
+        'except OSError as e: sys.exit(0 if e.errno in (errno.EACCES,errno.EPERM) else 42)\n'
+        'else: os.close(fd);sys.exit(43)'
+    )
+    try:
+        child=subprocess.run([sys.executable,'-c',snippet,str(key_path)],
+                             env={'PATH':'/usr/bin:/bin'},user=sut_uid,group=sut_gid,
+                             capture_output=True,timeout=5)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ProbeError('NOT_CHECKED: cannot run isolation probe as SUT identity') from exc
+    if child.returncode!=0:
+        raise ProbeError('NOT_CHECKED: synthetic witness key OS denial not proven')
+    return 'EACCES'
+
+
+def verify_scan_ref_coverage(advertised: dict[str,str], scanned: dict[str,str],
+                             *, verified_remote: bool) -> bool:
+    """Cross-check complete independently advertised remote branches against scans."""
+    if not verified_remote or not isinstance(advertised,dict) or not advertised:
+        raise ProbeError('NOT_CHECKED: remote refs were not independently enumerated')
+    if not isinstance(scanned,dict) or advertised!=scanned or any(
+        not isinstance(k,str) or not k.startswith('refs/heads/') or
+        not isinstance(v,str) or len(v)!=40 or any(c not in '0123456789abcdef' for c in v)
+        for k,v in advertised.items()
+    ):
+        raise ProbeError('NOT_CHECKED: unscanned or mismatched remote ref SHA coverage')
+    return True
 
 
 def _canonical(obj: object) -> bytes:
@@ -212,6 +343,35 @@ def verify_independent_proofs(
             if key in observed and observed[key] != value:
                 raise ProbeError(f'NOT_CHECKED: inconsistent witness measurement {key}')
             observed[key] = value
+    if (case['synthetic_input'].get('operation')=='run_evidence_quota_gate' and
+            case['synthetic_input'].get('eviction_allowed')):
+        expected_sha=case['synthetic_input']['protected_evidence_files'][0]['sha256']
+        backup_seq, eviction_seq=observed.get('backup_verified_event_seq'),observed.get('eviction_event_seq')
+        if (type(backup_seq) is not int or type(eviction_seq) is not int or
+                backup_seq < 0 or eviction_seq <= backup_seq or
+                observed.get('offnode_backed_up_sha256') != expected_sha or
+                not observed.get('verified_backup_receipt_id')):
+            raise ProbeError('NOT_CHECKED: no independently confirmed intact offnode backup before eviction')
+    if case['synthetic_input'].get('required_independent_reconciliation_trace'):
+        trace=observed.get('journal_transition_trace')
+        if (not isinstance(trace,list) or len(trace)!=3 or
+                [e.get('order') for e in trace if isinstance(e,dict)] != [1,2,3] or
+                [e.get('journal') for e in trace if isinstance(e,dict)] !=
+                  ['UNCERTAIN','RECONCILING','CONFIRMED']):
+            raise ProbeError('NOT_CHECKED: missing independent ordered reconciliation evidence')
+    if case['synthetic_input'].get('require_preexisting_test_sentinel'):
+        before=observed.get('sentinel_sha256_before')
+        after=observed.get('sentinel_sha256_after')
+        if (observed.get('sentinel_existed_before_probe') is not True or
+                before!=case['synthetic_input']['sentinel_sha256'] or after!=before):
+            raise ProbeError('NOT_CHECKED: pre-existing synthetic sentinel integrity not established')
+    if case['synthetic_input'].get('require_preexisting_listening_test_server'):
+        if observed.get('endpoint_listening_before_probe') is not True or observed.get('denial_due_to_network_os_policy') is not True:
+            raise ProbeError('NOT_CHECKED: network OS policy denial on listening endpoint not proven')
+    if case['synthetic_input'].get('operation')=='scan_git_tree_and_history':
+        verify_scan_ref_coverage(observed.get('remote_advertised_ref_sha'),
+                                 observed.get('scanned_ref_sha'),
+                                 verified_remote=observed.get('remote_refs_verified_by_collector') is True)
     for key, expected in case['expected_observations'].items():
         if key not in observed:
             raise ProbeError(f'NOT_CHECKED: no independent observation for {key}')

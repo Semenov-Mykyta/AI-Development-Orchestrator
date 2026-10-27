@@ -1178,7 +1178,11 @@
           "expected_observations": {
             "reason": "ARTIFACT_QUOTA_BLOCKED",
             "protected_evidence_removed": 0,
-            "worker_launches": 0
+            "worker_launches": 0,
+            "protected_evidence_sha256_before": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "protected_evidence_sha256_after": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "offnode_backup_integrity_verified": false,
+            "backup_verified_before_eviction": false
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -1217,7 +1221,12 @@
           "synthetic_input_only": true,
           "expected_observations": {
             "reason": "ARTIFACT_QUOTA_BLOCKED",
-            "worker_launches": 0
+            "worker_launches": 0,
+            "protected_evidence_removed": 0,
+            "protected_evidence_sha256_before": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "protected_evidence_sha256_after": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "offnode_backup_integrity_verified": false,
+            "backup_verified_before_eviction": false
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -1256,7 +1265,10 @@
           "scenario_id": "verified-offnode-and-lawful-eviction",
           "synthetic_input_only": true,
           "expected_observations": {
-            "readmission_performed": true
+            "readmission_performed": true,
+            "offnode_backup_integrity_verified": true,
+            "backup_verified_before_eviction": true,
+            "backup_digest_matches_source": true
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -1274,7 +1286,8 @@
             "backup_ack_id": "test-storage-ack-001",
             "backup_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "retention_age_days": 31,
-            "eviction_allowed": true
+            "eviction_allowed": true,
+            "require_independent_event_order": true
           },
           "independent_proofs": [
             {
@@ -1445,10 +1458,36 @@
             "ack_calls": 0,
             "duplicate_remote_writes_after_restart": 0,
             "fail_closed": true,
-            "journal_state": "UNCERTAIN",
             "intent_durable_before_write": true,
             "remote_writes_before_restart": 1,
-            "remote_writes_total_after_restart": 1
+            "remote_writes_total_after_restart": 1,
+            "journal_state_before_reconciliation": "UNCERTAIN",
+            "journal_state_during_reconciliation": "RECONCILING",
+            "remote_reconciliation_queries": 1,
+            "remote_outcome_confirmed": true,
+            "journal_state_after_reconciliation": "CONFIRMED",
+            "writes_while_uncertain": 0,
+            "journal_transition_trace": [
+              {
+                "order": 1,
+                "journal": "UNCERTAIN",
+                "remote_write_count": 1,
+                "remote_read_count": 0
+              },
+              {
+                "order": 2,
+                "journal": "RECONCILING",
+                "remote_write_count": 1,
+                "remote_read_count": 1
+              },
+              {
+                "order": 3,
+                "journal": "CONFIRMED",
+                "remote_write_count": 1,
+                "remote_read_count": 1,
+                "remote_outcome": "applied"
+              }
+            ]
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -1470,7 +1509,8 @@
             "fs_quota_applied_to_disposable_test_fs": true,
             "remote_calls_observed_externally": true,
             "restart_after_fault": true,
-            "required_independent_remote_counter": 1
+            "required_independent_remote_counter": 1,
+            "required_independent_reconciliation_trace": true
           },
           "independent_proofs": [
             {
@@ -1848,7 +1888,9 @@
           "synthetic_input_only": true,
           "expected_observations": {
             "unresolved_secret_findings": 0,
-            "all_refs_scanned": true
+            "all_refs_scanned": true,
+            "remote_refs_discovered_independently": true,
+            "each_advertised_ref_sha_scanned": true
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -1862,7 +1904,10 @@
             ],
             "history_mode": "reachable_commits_all_refs",
             "require_scan_report_with_ref_sha": true,
-            "unavailable_ref_policy": "NOT_CHECKED"
+            "unavailable_ref_policy": "NOT_CHECKED",
+            "ref_source": "advertised_by_test_remote",
+            "dynamic_remote_ref_enumeration_required": true,
+            "disallow_static_expected_refs_as_evidence": true
           },
           "independent_proofs": [
             {
@@ -2303,7 +2348,10 @@
             "test_runtime_isolated": true,
             "actual_errno": "EACCES",
             "actual_syscall": "read",
-            "denied_target": "/synthetic/supervisor-only/sentinel"
+            "denied_target": "/synthetic/supervisor-only/sentinel",
+            "sentinel_existed_before_probe": true,
+            "sentinel_digest_matches_before_after": true,
+            "denial_due_to_os_permissions": true
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2316,7 +2364,8 @@
             "isolate_type": "separate_test_namespace",
             "expect_errno": "EACCES",
             "worker_uid": "synthetic-unprivileged",
-            "sentinel_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "sentinel_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "require_preexisting_test_sentinel": true
           },
           "independent_proofs": [
             {
@@ -2343,7 +2392,10 @@
             "test_runtime_isolated": true,
             "actual_errno": "EACCES",
             "actual_syscall": "read",
-            "denied_target": "/synthetic/production-namespace/sentinel"
+            "denied_target": "/synthetic/production-namespace/sentinel",
+            "sentinel_existed_before_probe": true,
+            "sentinel_digest_matches_before_after": true,
+            "denial_due_to_os_permissions": true
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2356,7 +2408,8 @@
             "isolate_type": "separate_test_namespace",
             "expect_errno": "EACCES",
             "worker_uid": "synthetic-unprivileged",
-            "sentinel_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            "sentinel_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "require_preexisting_test_sentinel": true
           },
           "independent_proofs": [
             {
@@ -2381,9 +2434,11 @@
           "expected_observations": {
             "os_denied": true,
             "test_runtime_isolated": true,
-            "actual_errno": "ENETUNREACH",
+            "actual_errno": "EPERM",
             "actual_syscall": "connect",
-            "denied_target": "203.0.113.10:8443"
+            "denied_target": "127.0.0.1:18443",
+            "endpoint_listening_before_probe": true,
+            "denial_due_to_network_os_policy": true
           },
           "sut_execution_status": "NOT_CHECKED",
           "synthetic_input": {
@@ -2392,11 +2447,12 @@
             "must_test_actual_os_denial": true,
             "operation": "os_access_attempt_in_unprivileged_worker",
             "attempt": "connect",
-            "target": "203.0.113.10:8443",
+            "target": "127.0.0.1:18443",
             "isolate_type": "separate_test_namespace",
-            "expect_errno": "ENETUNREACH",
+            "expect_errno": "EPERM",
             "worker_uid": "synthetic-unprivileged",
-            "network_policy": "default_deny"
+            "network_policy": "deny_connect_to_listening_test_server",
+            "require_preexisting_listening_test_server": true
           },
           "independent_proofs": [
             {

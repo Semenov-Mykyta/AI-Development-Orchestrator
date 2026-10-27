@@ -61,7 +61,8 @@ def test_d5_006_fs_full_has_durable_intent_restart_trace():
     after=scenario('AC-ERR-03.2','full-fs-result-commit-after-remote-effect')
     assert before['synthetic_input']['operation']=='perform_remote_write_with_injected_fs_failure'
     assert after['synthetic_input']['operation']=='perform_remote_write_with_injected_fs_failure'
-    assert after['expected_observations']['journal_state']=='UNCERTAIN'
+    assert after['expected_observations']['journal_state_before_reconciliation']=='UNCERTAIN'
+    assert after['expected_observations']['journal_state_after_reconciliation']=='CONFIRMED'
     assert after['synthetic_input']['recovery_sequence']==['restart_supervisor','reconcile_with_remote','resume_only_after_outcome_known']
 
 
