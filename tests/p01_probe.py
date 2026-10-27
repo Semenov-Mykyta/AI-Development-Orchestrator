@@ -93,7 +93,9 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
         raise ProbeError('NOT_CHECKED: malformed signed policy') from exc
     required={'schema','collector_sha256','collector_path','witness_key_path','git_sha',
               'sut_uid','sut_gid','runner_uid','authorized_by','scope',
-              'sut_command_sha256','sut_repo_path','sut_executable_sha256'}
+              'sut_command_sha256','sut_repo_path','sut_executable_sha256',
+              'sut_components_sha256','git_scan_mirror_path','git_test_remote_url',
+              'synthetic_root_path'}
     if not isinstance(data,dict) or not required <= set(data) or data['schema']!='aio.p01.owner_signed_collector_policy.v1':
         raise ProbeError('NOT_CHECKED: incomplete signed collector policy')
     if data['scope']!='P01-D5' or not data['authorized_by'] or data['git_sha']!=git_sha:
@@ -111,6 +113,18 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
         raise ProbeError('NOT_CHECKED: SUT executable bytes are not signed/pinned')
     if not Path(data['sut_repo_path']).is_absolute():
         raise ProbeError('NOT_CHECKED: SUT checkout not pinned by signed policy')
+    components=data['sut_components_sha256']
+    if not isinstance(components,dict) or not components or not all(
+            isinstance(k,str) and Path(k).is_absolute() and
+            isinstance(v,str) and len(v)==64 and all(ch in '0123456789abcdef' for ch in v)
+            for k,v in components.items()):
+        raise ProbeError('NOT_CHECKED: signed runtime component closure missing')
+    if not isinstance(data['git_scan_mirror_path'],str) or not Path(data['git_scan_mirror_path']).is_absolute():
+        raise ProbeError('NOT_CHECKED: independent Git mirror not approved')
+    if not isinstance(data['git_test_remote_url'],str) or not data['git_test_remote_url']:
+        raise ProbeError('NOT_CHECKED: independently approved test remote URL missing')
+    if not isinstance(data['synthetic_root_path'],str) or data['synthetic_root_path']!='/synthetic':
+        raise ProbeError('NOT_CHECKED: approved test-only synthetic namespace missing')
     if data['sut_uid']==data['runner_uid']:
         raise ProbeError('NOT_CHECKED: signed policy selects same OS identity')
     if not Path(data['witness_key_path']).is_absolute():
@@ -191,7 +205,7 @@ def verify_sut_proc_identity(status_text: str, *, sut_uid: int, sut_gid: int, ru
     if (len(uids) != 4 or len(gids) != 4 or
             any(uid != sut_uid or uid == runner_uid for uid in uids) or
             any(gid != sut_gid for gid in gids) or
-            any(group in (0,) for group in groups) or
+            bool(groups) or
             any((cap_effective, cap_permitted, cap_ambient)) or no_new_privs != 1):
         raise ProbeError('NOT_CHECKED: SUT OS privilege escalation or mismatched credentials')
     return True
@@ -199,19 +213,48 @@ def verify_sut_proc_identity(status_text: str, *, sut_uid: int, sut_gid: int, ru
 
 def verify_complete_git_history(advertised: dict[str,str], scanned: dict[str,str], *,
                                 verified_remote: bool, reachable_commits: dict[str,list[str]],
-                                scanned_commits: list[str], reachable_verified: bool) -> bool:
+                                scanned_commits: list[str], reachable_verified: bool,
+                                trusted_remote_repo: Path | None = None,
+                                trusted_remote_url: str | None = None) -> bool:
+    """Prove against independent, COMPLETE synthetic remote mirror, never SUT report.
+
+    The mirror's provisioning/remote authenticity must be owner-authorized
+    out of band. A caller-controlled checkout or shallow clone is never proof.
+    """
+    import subprocess
     verify_scan_ref_coverage(advertised, scanned, verified_remote=verified_remote)
-    if (not reachable_verified or not isinstance(reachable_commits,dict) or
-            set(reachable_commits)!=set(advertised) or not isinstance(scanned_commits,list)):
-        raise ProbeError('NOT_CHECKED: independently enumerated reachable history absent')
-    commits=set()
-    for ref, ancestors in reachable_commits.items():
-        if (not isinstance(ancestors,list) or advertised[ref] not in ancestors or
-            any(not isinstance(x,str) or len(x)!=40 or any(c not in '0123456789abcdef' for c in x) for x in ancestors)):
-            raise ProbeError('NOT_CHECKED: invalid independently enumerated history')
-        commits.update(ancestors)
-    if set(scanned_commits)!=commits or len(scanned_commits)!=len(set(scanned_commits)):
-        raise ProbeError('NOT_CHECKED: not all reachable commits scanned')
+    if trusted_remote_repo is None or not trusted_remote_url:
+        raise ProbeError('NOT_CHECKED: independent Git mirror/remote authority required')
+    repo=Path(trusted_remote_repo)
+    try:
+        def git(*args):
+            return subprocess.check_output(['git','-C',str(repo),*args],text=True,timeout=10).strip()
+        remote_lines=subprocess.check_output(['git','ls-remote','--heads',trusted_remote_url],text=True,timeout=10).strip().splitlines()
+        remote_advertised={name:sha for sha,name in (row.split() for row in remote_lines)}
+        if not remote_advertised or remote_advertised!=advertised:
+            raise ProbeError('NOT_CHECKED: independent test remote advertised refs differ')
+        if git('rev-parse','--is-shallow-repository') != 'false':
+            raise ProbeError('NOT_CHECKED: shallow Git history cannot prove full remote reachability')
+        refs={}
+        for line in git('for-each-ref','--format=%(refname) %(objectname)','refs/heads/').splitlines():
+            ref,commit=line.split()
+            refs[ref]=commit
+        if not refs or refs!=advertised:
+            raise ProbeError('NOT_CHECKED: signed fixture refs differ from actual remote')
+        git('fsck','--full','--no-reflogs','--strict')
+        actual=set(git('rev-list','--all').splitlines())
+        if not actual or any(not git('cat-file','-t',sha)=='commit' for sha in actual):
+            raise ProbeError('NOT_CHECKED: incomplete Git object graph')
+        if not reachable_verified or not isinstance(reachable_commits,dict) or set(reachable_commits)!=set(refs):
+            raise ProbeError('NOT_CHECKED: unproven claimed reachable history')
+        for ref,sha in refs.items():
+            expected=set(git('rev-list',sha).splitlines())
+            if set(reachable_commits[ref])!=expected or len(reachable_commits[ref])!=len(expected):
+                raise ProbeError('NOT_CHECKED: ref ancestors incomplete')
+        if set(scanned_commits)!=actual or len(scanned_commits)!=len(actual):
+            raise ProbeError('NOT_CHECKED: not all independently reachable commits scanned')
+    except (OSError,subprocess.SubprocessError,ValueError,IndexError) as exc:
+        raise ProbeError('NOT_CHECKED: independent full Git mirror evidence unavailable') from exc
     return True
 
 
@@ -231,18 +274,136 @@ def verify_synthetic_object_bytes(spec: dict, actual: bytes) -> bool:
     return True
 
 
-def verify_immutable_sut_checkout(repo: Path, expected_sha: str, argv: list[str], approved_executable_sha256: str) -> bool:
-    import subprocess
+def materialize_synthetic_objects(synthetic_input: dict, workspace: Path) -> list[Path]:
+    """Create actual bounded synthetic files, SHA-check streaming bytes before SUT.
+
+    Only files inside isolated workspace; forbidden external namespace sentinels
+    must be provisioned by a separate root-controlled fixture owner and verified.
+    """
+    import os
+    files=synthetic_input.get('protected_evidence_files',[])
+    if not isinstance(files,list):
+        raise ProbeError('NOT_CHECKED: invalid evidence file plan')
+    created=[]
+    for f in files:
+        if not isinstance(f,dict) or not isinstance(f.get('path'),str):
+            raise ProbeError('NOT_CHECKED: synthetic file path missing')
+        relative=Path(f['path'])
+        if relative.is_absolute() or '..' in relative.parts:
+            raise ProbeError('NOT_CHECKED: unsafe synthetic fixture path')
+        target=workspace/relative
+        if not target.resolve().is_relative_to(workspace.resolve()):
+            raise ProbeError('NOT_CHECKED: synthetic fixture symlink escape')
+        generator=f.get('generator',{})
+        if generator.get('algorithm')!='repeat_utf8_seed_v1' or generator.get('size_bytes')!=f.get('size_bytes'):
+            raise ProbeError('NOT_CHECKED: unknown synthetic byte generator')
+        seed=generator.get('seed_utf8')
+        n=generator['size_bytes']
+        if not isinstance(seed,str) or not seed or type(n)!=int or n<0 or n>536870912:
+            raise ProbeError('NOT_CHECKED: invalid or oversized synthetic fixture')
+        block=seed.encode('utf8')
+        pattern=block*max(1,(1048576//len(block)))
+        target.parent.mkdir(parents=True,exist_ok=True)
+        digest=hashlib.sha256()
+        try:
+            with target.open('xb') as fd:
+                rest=n
+                while rest:
+                    chunk=pattern[:min(rest,len(pattern))]
+                    fd.write(chunk);digest.update(chunk);rest-=len(chunk)
+                fd.flush();os.fsync(fd.fileno())
+        except OSError as exc:
+            raise ProbeError('NOT_CHECKED: synthetic fixture not materialized') from exc
+        if digest.hexdigest()!=f.get('sha256'):
+            target.unlink(missing_ok=True)
+            raise ProbeError('NOT_CHECKED: generated synthetic bytes do not match independently declared SHA')
+        # Measure the actual on-disk bytes, not only the generator's write stream.
+        measured=hashlib.sha256()
+        with target.open('rb') as fd:
+            while chunk:=fd.read(1048576): measured.update(chunk)
+        if measured.hexdigest()!=f['sha256'] or target.stat().st_size!=n:
+            raise ProbeError('NOT_CHECKED: actual synthetic file bytes not verified')
+        created.append(target)
+    return created
+
+
+def require_preexisting_synthetic_sentinel(synthetic_input: dict, *, trusted_root: Path) -> Path:
+    """Positive OS-sentinel seam: no writes outside an approved synthetic root.
+
+    A separate privileged test-fixture owner MUST already have provisioned the
+    synthetic bytes. All ancestors/target must be root-owned and non-writable
+    to the SUT; otherwise fail without probing production paths.
+    """
+    target=Path(synthetic_input.get('target',''))
+    generator=synthetic_input.get('sentinel_generator')
+    if (not target.is_absolute() or trusted_root!=Path('/synthetic') or
+            not target.is_relative_to(trusted_root) or not isinstance(generator,dict) or
+            generator.get('algorithm')!='repeat_utf8_seed_v1'):
+        raise ProbeError('NOT_CHECKED: invalid approved synthetic sentinel path/generator')
     try:
-        head=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True,timeout=5).strip()
-        diff=subprocess.check_output(['git','-C',str(repo),'status','--porcelain','--untracked-files=all'],text=True,timeout=5)
-        check=subprocess.check_output(['git','-C',str(repo),'diff','--exit-code','HEAD'],timeout=5)
+        import os
+        for p in (target,*target.parents):
+            if p.is_symlink() or p.stat().st_uid!=0 or p.stat().st_mode & 0o022:
+                raise ProbeError('NOT_CHECKED: synthetic OS sentinel not protected from SUT')
+        if not target.is_file() or target.stat().st_size!=generator['size_bytes']:
+            raise ProbeError('NOT_CHECKED: synthetic sentinel not preexisting')
+        # Sentinel is small (137 bytes) in frozen P01 fixtures. Large objects are
+        # streamed separately by materialize_synthetic_objects.
+        with target.open('rb') as fd: raw=fd.read(4096)
+        spec={**generator,'sha256':synthetic_input.get('sentinel_sha256')}
+        verify_synthetic_object_bytes(spec,raw)
+    except (OSError,TypeError,KeyError) as exc:
+        raise ProbeError('NOT_CHECKED: synthetic OS sentinel not provisioned') from exc
+    return target
+
+
+def verify_immutable_sut_checkout(repo: Path, expected_sha: str, argv: list[str],
+                                  approved_executable_sha256: str, *,
+                                  approved_components_sha256: dict[str,str] | None = None) -> bool:
+    """Fail closed on modified tracked, ignored scripts or unpinned runtime bytes.
+
+    A signed manifest must include interpreter/binary, scripts, and declared
+    import/dependency closure. Actual immutable OS mount and import tracing
+    remain mandatory independent runtime evidence.
+    """
+    import subprocess
+    if not isinstance(approved_components_sha256,dict) or not approved_components_sha256:
+        raise ProbeError('NOT_CHECKED: signed executable/component closure is absent')
+    try:
+        def git(*args):
+            return subprocess.check_output(['git','-C',str(repo),*args],text=True,timeout=10).strip()
+        head=git('rev-parse','HEAD')
+        diff=git('status','--porcelain','--untracked-files=all')
+        git('diff','--exit-code','HEAD')
+        ignored=git('ls-files','--others','--ignored','--exclude-standard')
     except (OSError,subprocess.SubprocessError) as exc:
         raise ProbeError('NOT_CHECKED: cannot inspect immutable SUT tree') from exc
-    exe=Path(argv[0])
-    if (head!=expected_sha or diff.strip() or not exe.is_file() or
-            exe.is_symlink() or hashlib.sha256(exe.read_bytes()).hexdigest()!=approved_executable_sha256):
-        raise ProbeError('NOT_CHECKED: checkout/executable differs from signed approved bytes')
+    if head!=expected_sha or diff:
+        raise ProbeError('NOT_CHECKED: dirty/incorrect SUT checkout')
+    # Ignored runtime files can alter imports without changing HEAD; no bypass.
+    if any(Path(name).suffix.lower() in {'.py','.pyc','.so','.pyd','.sh','.whl','.zip'} for name in ignored.splitlines()):
+        raise ProbeError('NOT_CHECKED: ignored executable/dependency in SUT checkout')
+    if not argv or not Path(argv[0]).is_absolute():
+        raise ProbeError('NOT_CHECKED: SUT executable must be absolute')
+    executable=Path(argv[0])
+    if str(executable.resolve(strict=True)) not in approved_components_sha256:
+        raise ProbeError('NOT_CHECKED: SUT executable missing from signed closure')
+    if approved_components_sha256[str(executable.resolve())]!=approved_executable_sha256:
+        raise ProbeError('NOT_CHECKED: executable digest differs from signed policy')
+    # A Python/shell interpreter is not the script: pin argv script inputs too.
+    # Never allow argv to select a relative workspace script after admission.
+    if argv[1:] and Path(argv[0]).name.startswith(('python','bash','sh')):
+        if argv[1] in ('-m','-c') or (not argv[1].startswith('-') and not Path(argv[1]).is_absolute()):
+            raise ProbeError('NOT_CHECKED: interpreter mode/script not pinned as an absolute executable component')
+    for component in [arg for arg in argv[1:] if Path(arg).is_absolute() and Path(arg).is_file()]:
+        if str(Path(component).resolve()) not in approved_components_sha256:
+            raise ProbeError('NOT_CHECKED: invoked script not pinned in signed closure')
+    for name,sha in approved_components_sha256.items():
+        p=Path(name)
+        if (not p.is_absolute() or p.is_symlink() or not p.is_file() or
+                str(p.resolve()) != name or
+                hashlib.sha256(p.read_bytes()).hexdigest()!=sha):
+            raise ProbeError('NOT_CHECKED: executable/script/import bytes differ from signed closure')
     return True
 
 
@@ -304,6 +465,8 @@ class TestRun:
     process_pids: tuple[int, ...] = ()
     returncodes: tuple[int, ...] = ()
     collector_sha256: str = ''
+    trusted_remote_repo: Path | None = None
+    trusted_remote_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -447,7 +610,9 @@ def verify_independent_proofs(
                                     verified_remote=observed.get('remote_refs_verified_by_collector') is True,
                                     reachable_commits=observed.get('remote_reachable_commits'),
                                     scanned_commits=observed.get('scanned_reachable_commits'),
-                                    reachable_verified=observed.get('reachable_history_verified_by_collector') is True)
+                                    reachable_verified=observed.get('reachable_history_verified_by_collector') is True,
+                                    trusted_remote_repo=run.trusted_remote_repo,
+                                    trusted_remote_url=run.trusted_remote_url)
     for key, expected in case['expected_observations'].items():
         if key not in observed:
             raise ProbeError(f'NOT_CHECKED: no independent observation for {key}')
@@ -467,14 +632,31 @@ def _load_pinned_collector(collector_file: Path, approved_sha256: str, workspace
     Real trust provenance still requires independent owner root provisioning.
     """
     import os
+    import sys
     import tempfile
+    import importlib
+    if collector_file.is_symlink():
+        raise ProbeError('NOT_CHECKED: collector symlink forbidden')
     path = collector_file.resolve(strict=True)
-    if path.is_relative_to(workspace.resolve()) or path.is_symlink():
+    if path.is_relative_to(workspace.resolve()):
         raise ProbeError('NOT_CHECKED: collector in SUT space')
     for element in (path, *path.parents):
         st=element.stat()
         if st.st_uid != 0 or st.st_mode & 0o022 or (sut_uid is not None and st.st_uid==sut_uid):
             raise ProbeError('NOT_CHECKED: collector/path not protected from SUT writes')
+    # Reject any import search directory writable by SUT, even if primary
+    # collector was signed. A signed, root-owned stdlib/site-packages closure is
+    # required for real approved runners; no SUT-writable PYTHONPATH imports.
+    for name in sys.path:
+        if not name:
+            raise ProbeError('NOT_CHECKED: cwd on collector import path')
+        directory=Path(name).resolve()
+        if directory.is_relative_to(workspace.resolve()) or not directory.exists():
+            raise ProbeError('NOT_CHECKED: untrusted/missing collector import path')
+        for ancestor in (directory,*directory.parents):
+            st=ancestor.stat()
+            if st.st_uid!=0 or st.st_mode & 0o022 or (sut_uid is not None and st.st_uid==sut_uid):
+                raise ProbeError('NOT_CHECKED: transitive collector import path is SUT writable')
     payload=path.read_bytes()
     if _sha256(payload) != approved_sha256:
         raise ProbeError('NOT_CHECKED: approved collector digest mismatch')

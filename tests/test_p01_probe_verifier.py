@@ -116,7 +116,7 @@ def test_changed_returncode_even_with_original_mac_is_rejected(tmp_path):
         verify_independent_proofs(CASE,{},proofs,newer,**params(newer))
 
 
-def test_real_subprocess_and_external_fs_collector_positive_and_negative(tmp_path):
+def test_real_subprocess_and_external_fs_collector_positive_and_negative(tmp_path, monkeypatch):
     """Plumbing smoke test: real child makes a file, independent plugin stats it.
 
     NOT a P01/OS-security acceptance PASS. This is a self-contained unit test.
@@ -145,6 +145,14 @@ def test_real_subprocess_and_external_fs_collector_positive_and_negative(tmp_pat
     plugin.chmod(0o600)
     from dataclasses import replace
     run=replace(run,collector_sha256=_sha256(plugin.read_bytes()))
+    # Pure unit-only seam: mock *authorization* of the temporary collector;
+    # dedicated negative tests cover rejection by the production trust boundary.
+    # A local tmp_path collector must NEVER be accepted by real root-owned loader.
+    import importlib.util
+    from p01_probe import ProbeError
+    spec=importlib.util.spec_from_file_location('unit_only_fs_collector',plugin)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    monkeypatch.setattr('p01_probe._load_pinned_collector',lambda *a, **k: module.collect)
     evidence=collect_trusted_evidence(synthetic_input=fixture,required_sources=['filesystem_snapshot'],
                                       run=run,collector_file=plugin,collector_sha256=_sha256(plugin.read_bytes()),
                                       witness_key=KEY)

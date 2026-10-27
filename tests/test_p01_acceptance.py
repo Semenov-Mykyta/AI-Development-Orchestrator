@@ -16,7 +16,8 @@ import pytest
 from p01_probe import (ProbeError, TestRun, collect_trusted_evidence,
                        verify_independent_proofs, verify_normative_expectations, _canonical,
                        load_externally_approved_runner_policy, require_witness_key_isolation,
-                       verify_sut_proc_identity, verify_immutable_sut_checkout)
+                       verify_sut_proc_identity, verify_immutable_sut_checkout,
+                       materialize_synthetic_objects, require_preexisting_synthetic_sentinel)
 
 ORACLE = Path(__file__).resolve().parent / 'fixtures' / 'p01' / 'P01_ORACLES.json'
 ITEMS = json.loads(ORACLE.read_text('utf8'))['items']
@@ -67,7 +68,8 @@ def approved_test_subprocess():
     if actual_git != git_sha:
         pytest.fail('NOT_CHECKED: Git HEAD does not match approved SUT SHA', pytrace=False)
     try:
-        verify_immutable_sut_checkout(Path(repo), git_sha, argv, policy['sut_executable_sha256'])
+        verify_immutable_sut_checkout(Path(repo), git_sha, argv, policy['sut_executable_sha256'],
+                                      approved_components_sha256=policy['sut_components_sha256'])
     except ProbeError as exc:
         pytest.fail(str(exc), pytrace=False)
     # Collector and witness key belong to a different trust domain from SUT.
@@ -82,13 +84,16 @@ def approved_test_subprocess():
         pytest.fail('NOT_CHECKED: weak/absent witness key', pytrace=False)
     if Path(keypath).stat().st_mode & 0o077:
         pytest.fail('NOT_CHECKED: witness key accessible outside owner', pytrace=False)
-    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid
+    trusted_git_mirror=Path(policy['git_scan_mirror_path'])
+    if trusted_git_mirror.resolve().is_relative_to(Path(repo).resolve()):
+        pytest.fail('NOT_CHECKED: test Git remote inside SUT checkout',pytrace=False)
+    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid, trusted_git_mirror, Path(policy['synthetic_root_path'])
 
 
 @pytest.mark.parametrize('ac_id,case', TEST_CASES,
                          ids=[f'{ac}:{s["scenario_id"]}' for ac,s in TEST_CASES])
 def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
-    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid = approved_test_subprocess
+    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid, trusted_git_mirror, synthetic_root = approved_test_subprocess
     with tempfile.TemporaryDirectory(prefix='aio-p01-synthetic-') as scratch:
         scratch_path = Path(scratch)
         workspace = scratch_path / 'workspace'
@@ -103,6 +108,17 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
         env = {'PATH':'/usr/bin:/bin', 'LANG':'C.UTF-8', 'AIO_TEST_ONLY':'1',
                'HOME':str(workspace), 'TMPDIR':str(workspace)}
         raw = case['synthetic_input']
+        try:
+            materialize_synthetic_objects(raw,workspace)
+        except ProbeError as exc:
+            pytest.fail(str(exc),pytrace=False)
+        # Admission requires independently provisioned OS sentinels. A declared
+        # synthetic generator alone is never evidence that the file exists.
+        if raw.get('require_preexisting_test_sentinel'):
+            try:
+                require_preexisting_synthetic_sentinel(raw, trusted_root=synthetic_root)
+            except ProbeError as exc:
+                pytest.fail(str(exc),pytrace=False)
         # NEW-D5-017: a repeated registration is two actual subprocess calls
         # operating on the SAME persisted workspace, not a fictitious count.
         steps = raw.get('sequence') or [raw]
@@ -135,7 +151,7 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
                       workspace=workspace, git_sha=git_sha, run_id=str(uuid.uuid4()),
                       process_start_ticks=start_ticks,
                       process_pids=tuple(pids), returncodes=tuple(codes),
-                      collector_sha256=collector_sha)
+                      collector_sha256=collector_sha, trusted_remote_repo=trusted_git_mirror, trusted_remote_url=policy['git_test_remote_url'])
         sources = [p['source'] for p in case['independent_proofs']]
         try:
             evidence = collect_trusted_evidence(synthetic_input=raw, required_sources=sources,
