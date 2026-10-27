@@ -274,17 +274,29 @@ def verify_synthetic_object_bytes(spec: dict, actual: bytes) -> bool:
     return True
 
 
-def materialize_synthetic_objects(synthetic_input: dict, workspace: Path) -> list[Path]:
+def materialize_synthetic_objects(synthetic_input: dict, workspace: Path, *,
+                                  sut_uid: int | None = None, sut_gid: int | None = None) -> list[Path]:
     """Create exactly reproducible synthetic files or roll back ALL newly created bytes.
 
     An error during writing, fsync, a post-write digest/size recheck, or a later
     file never leaves a partially populated fixture namespace reusable as PASS.
+
+    When sut_uid/gid are explicitly approved, hand off ONLY synthetic SUT-owned
+    evidence after bytes are verified; retain runner-owned witness/off-node files
+    outside this workspace. A policy test must not pass merely because the OS
+    denied the SUT access to the synthetic evidence it was meant to manage.
     """
     import os
     files=synthetic_input.get('protected_evidence_files',[])
     if not isinstance(files,list):
         raise ProbeError('NOT_CHECKED: invalid evidence file plan')
+    if (sut_uid is None) != (sut_gid is None):
+        raise ProbeError('NOT_CHECKED: synthetic SUT uid/gid must be specified together')
+    if sut_uid is not None and (type(sut_uid) is not int or sut_uid <= 0 or
+                                type(sut_gid) is not int or sut_gid <= 0):
+        raise ProbeError('NOT_CHECKED: invalid synthetic SUT identity')
     created=[]
+    made_dirs=[]
     active=None
     try:
         for f in files:
@@ -305,7 +317,24 @@ def materialize_synthetic_objects(synthetic_input: dict, workspace: Path) -> lis
                 raise ProbeError('NOT_CHECKED: invalid or oversized synthetic fixture')
             block=seed.encode('utf8')
             pattern=block*max(1,(1048576//len(block)))
-            target.parent.mkdir(parents=True,exist_ok=True)
+            # Track only directories newly created for this fixture. Existing
+            # directories must ALREADY be SUT-owned when ownership is requested.
+            parents=[]
+            cursor=target.parent
+            while cursor != workspace and cursor.is_relative_to(workspace):
+                parents.append(cursor)
+                cursor=cursor.parent
+            for directory in reversed(parents):
+                if not directory.exists():
+                    directory.mkdir(mode=0o700)
+                    made_dirs.append(directory)
+                elif directory.is_symlink() or not directory.is_dir():
+                    raise ProbeError('NOT_CHECKED: unsafe synthetic fixture parent')
+                elif sut_uid is not None and directory not in made_dirs and (
+                     directory.stat().st_uid != sut_uid or
+                     directory.stat().st_gid != sut_gid or
+                     not (directory.stat().st_mode & 0o300) == 0o300):
+                    raise ProbeError('NOT_CHECKED: preexisting synthetic directory not SUT-accessible')
             digest=hashlib.sha256()
             # O_EXCL | O_NOFOLLOW prevents overwriting old fixtures or symlink targets.
             fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
@@ -329,17 +358,71 @@ def materialize_synthetic_objects(synthetic_input: dict, workspace: Path) -> lis
                 raise ProbeError('NOT_CHECKED: actual synthetic file bytes not verified')
             created.append(target)
             active=None
+        if sut_uid is not None:
+            # Do not launch SUT until the entire fixture set is verified. File
+            # ownership and directory traversal are part of the test contract.
+            for target in created:
+                os.chown(target,sut_uid,sut_gid)
+                os.chmod(target,0o600)
+            for directory in made_dirs:
+                os.chown(directory,sut_uid,sut_gid)
+                os.chmod(directory,0o700)
+            for target in created:
+                st=target.stat()
+                pst=target.parent.stat()
+                if (st.st_uid!=sut_uid or st.st_gid!=sut_gid or
+                    pst.st_uid!=sut_uid or pst.st_gid!=sut_gid):
+                    raise ProbeError('NOT_CHECKED: synthetic SUT evidence ownership incorrect')
         return created
     except (OSError,ProbeError,ValueError,TypeError) as exc:
         pending=created+([active] if active is not None else [])
         try:
             for path in reversed(pending):
                 path.unlink(missing_ok=True)
+            for directory in reversed(made_dirs):
+                directory.rmdir()
         except OSError as cleanup_exc:
             raise ProbeError('NOT_CHECKED: synthetic fixture rollback could not be verified') from cleanup_exc
         if isinstance(exc,ProbeError):
             raise
         raise ProbeError('NOT_CHECKED: synthetic fixture materialization incomplete') from exc
+
+
+def require_sut_synthetic_evidence_access(files: list[Path], *, sut_uid: int, sut_gid: int) -> None:
+    """Runner-side OS test: a separate SUT identity can read and evict fixtures.
+
+    Independently checks the *setup*, never a normative P01 AC. Test evidence
+    lives in the disposable SUT workspace, separate from runner-owned witness.
+    No production paths, network operations or real credentials are used.
+    """
+    if not files:
+        return
+    import os
+    import subprocess
+    import sys
+    if (type(sut_uid) is not int or type(sut_gid) is not int or
+            sut_uid <= 0 or sut_gid <= 0 or os.geteuid() == sut_uid):
+        raise ProbeError('NOT_CHECKED: OS access probe requires separate unprivileged SUT identity')
+    script = (
+        'from pathlib import Path\n'
+        'import os,sys\n'
+        'for name in sys.argv[1:]:\n'
+        ' p=Path(name)\n'
+        ' with p.open("rb") as stream: stream.read(1)\n'
+        ' witness=p.parent / (".aio-p01-access-probe-"+str(os.getpid()))\n'
+        ' with witness.open("xb") as stream: stream.write(b"synthetic")\n'
+        ' witness.unlink()\n'
+    )
+    try:
+        result=subprocess.run([sys.executable,'-I','-S','-B','-c',script,
+                               *(str(p) for p in files)],
+                              user=sut_uid,group=sut_gid,extra_groups=[],
+                              env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+                              capture_output=True,timeout=10,check=False)
+    except (OSError,subprocess.SubprocessError) as exc:
+        raise ProbeError('NOT_CHECKED: OS synthetic evidence access probe unavailable') from exc
+    if result.returncode != 0:
+        raise ProbeError('NOT_CHECKED: OS synthetic evidence is not SUT-readable/evictable')
 
 
 def require_preexisting_synthetic_sentinel(synthetic_input: dict, *, trusted_root: Path) -> Path:
@@ -405,6 +488,14 @@ def verify_immutable_sut_checkout(repo: Path, expected_sha: str, argv: list[str]
         raise ProbeError('NOT_CHECKED: SUT executable missing from signed closure')
     if approved_components_sha256[str(executable.resolve())]!=approved_executable_sha256:
         raise ProbeError('NOT_CHECKED: executable digest differs from signed policy')
+    # Known executable wrappers can launch unapproved scripts while their own bytes
+    # remain pinned. A signed 'env' binary is NOT authority for an unsigned child.
+    # If additional wrapper forms are required, they need an approved, explicitly
+    # attested execution chain; this D5 runner rejects them fail-closed.
+    wrappers={'env','sudo','su','runuser','doas','setpriv','nice','nohup','timeout',
+              'stdbuf','setsid','chroot','busybox','xargs','find','taskset','ionice','watch'}
+    if executable.name in wrappers or executable.resolve().name in wrappers:
+        raise ProbeError('NOT_CHECKED: executable wrapper not permitted in signed SUT command')
     # Only a directly named absolute script is allowed for Python/shell launch.
     # Flags such as -B, -m, -c and other positional interpreters are rejected:
     # they can shift the actual script past argv[1] or execute unsigned bytes.

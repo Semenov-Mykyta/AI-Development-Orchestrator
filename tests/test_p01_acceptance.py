@@ -17,7 +17,8 @@ from p01_probe import (ProbeError, TestRun, collect_trusted_evidence,
                        verify_independent_proofs, verify_normative_expectations, _canonical,
                        load_externally_approved_runner_policy, require_witness_key_isolation,
                        verify_sut_proc_identity, verify_immutable_sut_checkout,
-                       materialize_synthetic_objects, require_preexisting_synthetic_sentinel)
+                       materialize_synthetic_objects, require_preexisting_synthetic_sentinel,
+                       require_sut_synthetic_evidence_access)
 
 ORACLE = Path(__file__).resolve().parent / 'fixtures' / 'p01' / 'P01_ORACLES.json'
 ITEMS = json.loads(ORACLE.read_text('utf8'))['items']
@@ -124,7 +125,8 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
                'HOME':str(workspace), 'TMPDIR':str(workspace)}
         raw = case['synthetic_input']
         try:
-            materialize_synthetic_objects(raw,workspace)
+            synthetic_evidence = materialize_synthetic_objects(raw,workspace,sut_uid=sut_uid,sut_gid=sut_gid)
+            require_sut_synthetic_evidence_access(synthetic_evidence,sut_uid=sut_uid,sut_gid=sut_gid)
         except ProbeError as exc:
             pytest.fail(str(exc),pytrace=False)
         # Admission requires independently provisioned OS sentinels. A declared
