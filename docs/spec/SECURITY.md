@@ -1,10 +1,10 @@
-# SECURITY.md — ТЗ-AIO v0.12 · DRAFT
+# SECURITY.md — ТЗ-AIO v0.13 · APPROVED (КТ4 APR-08)
 
 | Поле | Значение |
 |---|---|
-| Статус | DRAFT Э6; пояснение к нормативным требованиям, не их замена |
+| Статус | APPROVED (КТ4 APR-08); пояснение к нормативным требованиям, не их замена |
 | Нормативные источники | SPEC.md §§11, 13; ARCHITECTURE.md §§4.6, 4.9.5, 4.9.7; AGENTS.md §1 D1–D7/R1–R4 |
-| Дата | 26.10.2026 |
+| Дата | 27.10.2026 |
 
 ## Границы доверия и угрозы
 
@@ -17,6 +17,10 @@
 ## Безопасный список имен (НЕ значения)
 
 `CODEX_AUTH_REF`, `GITHUB_WRITE_CREDENTIAL_REF`, `TELEGRAM_BOT_TOKEN_REF`, `OWNER_TELEGRAM_ID`. Фактический способ выдачи и ограничения scoped-credentials проверяются через DEP-01/DEP-05; production секреты агенты не видят. Источник правил ротации и отзыва — ARCH §4.9.7. Предэксплуатационная проверка owner required: AC-N-SEC-05.3. Она получает `PASS` только от аутентифицированного владельца по актуальному scope/permissions/environment и доказательствам, а не из ответа Reviewer; даже при техническом `APPROVED` этап P01 остаётся без `COMPLETED` и не разрешает старт зависимых этапов до owner PASS (SPEC AC-F-18.1, §8.1). Для S8 применяется определённая в ARCH §4.9.7 политика (долгоживущие credentials ≤90 календарных суток или раньше provider expiry, краткоживущие до TTL; немедленные revoke/block при инциденте); метод и негативный oracle `AC-N-SEC-05.5`. Срок 90 суток — явно выбранный владельцем вариант OQ-10/A по APR-07 для MVP; реальное выполнение ротации проверяется до эксплуатации, APR-07 не является КТ4; значения секретов нигде не фиксируются.
+
+### P01 bootstrap owner approval до C-08/C-09
+
+Начальный AC-N-SEC-05.3 получает только настоящее owner `PASS` через защищённый GitHub PR review с независимым подтверждением identity, точного SHA, manifest digest, среды и фактических role/permission metadata по ARCH §4.6. Нельзя принимать GitHub comment или самоотчёт Developer за owner approval. Пока evidence не подтверждено, P01 `NOT_CHECKED` и P02 не допускается. Сохраняется durable remote review; при появлении C-09 его provenance повторно проверяется до включения в штатное хранилище; новые или изменённые runtime права требуют свежей user inspection до production. Этот bootstrap — процесс приёмки внедрения, не обход runtime единственного State Store и не альтернативный Telegram Owner Gateway.
 
 ## Обязательная последовательность внедрения
 
