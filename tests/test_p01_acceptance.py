@@ -15,7 +15,8 @@ import uuid
 import pytest
 from p01_probe import (ProbeError, TestRun, collect_trusted_evidence,
                        verify_independent_proofs, verify_normative_expectations, _canonical,
-                       load_externally_approved_runner_policy, require_witness_key_isolation)
+                       load_externally_approved_runner_policy, require_witness_key_isolation,
+                       verify_sut_proc_identity, verify_immutable_sut_checkout)
 
 ORACLE = Path(__file__).resolve().parent / 'fixtures' / 'p01' / 'P01_ORACLES.json'
 ITEMS = json.loads(ORACLE.read_text('utf8'))['items']
@@ -65,6 +66,10 @@ def approved_test_subprocess():
         pytest.fail('NOT_CHECKED: cannot independently inspect checked out SUT HEAD', pytrace=False)
     if actual_git != git_sha:
         pytest.fail('NOT_CHECKED: Git HEAD does not match approved SUT SHA', pytrace=False)
+    try:
+        verify_immutable_sut_checkout(Path(repo), git_sha, argv, policy['sut_executable_sha256'])
+    except ProbeError as exc:
+        pytest.fail(str(exc), pytrace=False)
     # Collector and witness key belong to a different trust domain from SUT.
     for secure_path in (collector, keypath):
         if Path(secure_path).resolve().is_relative_to(Path(repo).resolve()):
@@ -107,14 +112,16 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
             fixture.write_bytes(_canonical(step))
             process = subprocess.Popen(argv + [str(fixture)], cwd=workspace, env=env,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       user=sut_uid, group=sut_gid)
+                                       user=sut_uid, group=sut_gid, extra_groups=[],
+                                       start_new_session=True)
             try:
                 start_ticks = _start_ticks(process.pid)
                 status = Path(f'/proc/{process.pid}/status').read_text()
-                actual_uid = int(next(l for l in status.splitlines() if l.startswith('Uid:')).split()[1])
-                if actual_uid != sut_uid or actual_uid == os.geteuid():
+                try:
+                    verify_sut_proc_identity(status, sut_uid=sut_uid, sut_gid=sut_gid, runner_uid=os.geteuid())
+                except ProbeError as exc:
                     process.kill(); process.wait()
-                    pytest.fail('NOT_CHECKED: SUT did not run as isolated approved UID',pytrace=False)
+                    pytest.fail(str(exc),pytrace=False)
                 process.communicate(timeout=30)
             except subprocess.TimeoutExpired:
                 process.kill()
@@ -133,7 +140,7 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
         try:
             evidence = collect_trusted_evidence(synthetic_input=raw, required_sources=sources,
                                                 run=run, collector_file=collector,
-                                                collector_sha256=collector_sha, witness_key=witness_key)
+                                                collector_sha256=collector_sha, witness_key=witness_key, sut_uid=sut_uid)
             verify_independent_proofs(case, {}, evidence, run,
                                       trusted_witness_key=witness_key,
                                       expected_git_sha=git_sha, expected_command_digest=run.command_digest,

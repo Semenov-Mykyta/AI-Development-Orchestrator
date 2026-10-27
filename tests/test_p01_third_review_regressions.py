@@ -37,7 +37,7 @@ def test_third_019_untrusted_self_approved_collector_denied(tmp_path):
     pub.write_bytes(owner.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo))
     trusted=tmp_path/'test_collector.py';trusted.write_text('def collect(**kw): return {}\n')
     policy={'schema':'aio.p01.owner_signed_collector_policy.v1','collector_sha256':hashlib.sha256(trusted.read_bytes()).hexdigest(),'collector_path':str(trusted),
-            'witness_key_path':str(tmp_path/'key'), 'git_sha':'a'*40, 'sut_uid':65534,'sut_gid':65534,'runner_uid':0,'authorized_by':'owner-independent-id', 'scope':'P01-D5','sut_command_sha256':'c'*64,'sut_repo_path':'/synthetic-test-repo'}
+            'witness_key_path':str(tmp_path/'key'), 'git_sha':'a'*40, 'sut_uid':65534,'sut_gid':65534,'runner_uid':0,'authorized_by':'owner-independent-id', 'scope':'P01-D5','sut_command_sha256':'c'*64,'sut_repo_path':'/synthetic-test-repo','sut_executable_sha256':'d'*64}
     payload=_canonical(policy)
     with pytest.raises(ProbeError,match='signature|authority'):
         verify_signed_collector_policy(payload,attacker.sign(payload),pub,collector_file=trusted,git_sha='a'*40)

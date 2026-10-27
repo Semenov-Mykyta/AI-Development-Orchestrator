@@ -1179,8 +1179,8 @@
             "reason": "ARTIFACT_QUOTA_BLOCKED",
             "protected_evidence_removed": 0,
             "worker_launches": 0,
-            "protected_evidence_sha256_before": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "protected_evidence_sha256_after": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "protected_evidence_sha256_before": "7e6fe3980fda2e4769045e64a8a76c44ad93aea2f4ab2d4d73477170dc2be5ff",
+            "protected_evidence_sha256_after": "7e6fe3980fda2e4769045e64a8a76c44ad93aea2f4ab2d4d73477170dc2be5ff",
             "offnode_backup_integrity_verified": false,
             "backup_verified_before_eviction": false
           },
@@ -1194,7 +1194,12 @@
               {
                 "path": "evidence/protected-01.bin",
                 "size_bytes": 536870912,
-                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "sha256": "7e6fe3980fda2e4769045e64a8a76c44ad93aea2f4ab2d4d73477170dc2be5ff",
+                "generator": {
+                  "algorithm": "repeat_utf8_seed_v1",
+                  "seed_utf8": "AIO-P01-PROTECTED-EVIDENCE-v1:evidence/protected-01.bin",
+                  "size_bytes": 536870912
+                }
               }
             ],
             "backup_ack_id": null
@@ -1223,8 +1228,8 @@
             "reason": "ARTIFACT_QUOTA_BLOCKED",
             "worker_launches": 0,
             "protected_evidence_removed": 0,
-            "protected_evidence_sha256_before": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "protected_evidence_sha256_after": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "protected_evidence_sha256_before": "7e6fe3980fda2e4769045e64a8a76c44ad93aea2f4ab2d4d73477170dc2be5ff",
+            "protected_evidence_sha256_after": "7e6fe3980fda2e4769045e64a8a76c44ad93aea2f4ab2d4d73477170dc2be5ff",
             "offnode_backup_integrity_verified": false,
             "backup_verified_before_eviction": false
           },
@@ -1239,7 +1244,12 @@
               {
                 "path": "evidence/protected-01.bin",
                 "size_bytes": 536870912,
-                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "sha256": "7e6fe3980fda2e4769045e64a8a76c44ad93aea2f4ab2d4d73477170dc2be5ff",
+                "generator": {
+                  "algorithm": "repeat_utf8_seed_v1",
+                  "seed_utf8": "AIO-P01-PROTECTED-EVIDENCE-v1:evidence/protected-01.bin",
+                  "size_bytes": 536870912
+                }
               }
             ],
             "backup_ack_id": null
@@ -1280,11 +1290,16 @@
               {
                 "path": "evidence/protected-01.bin",
                 "size_bytes": 536870912,
-                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "sha256": "7e6fe3980fda2e4769045e64a8a76c44ad93aea2f4ab2d4d73477170dc2be5ff",
+                "generator": {
+                  "algorithm": "repeat_utf8_seed_v1",
+                  "seed_utf8": "AIO-P01-PROTECTED-EVIDENCE-v1:evidence/protected-01.bin",
+                  "size_bytes": 536870912
+                }
               }
             ],
             "backup_ack_id": "test-storage-ack-001",
-            "backup_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "backup_digest": "7e6fe3980fda2e4769045e64a8a76c44ad93aea2f4ab2d4d73477170dc2be5ff",
             "retention_age_days": 31,
             "eviction_allowed": true,
             "require_independent_event_order": true
@@ -1907,7 +1922,8 @@
             "unavailable_ref_policy": "NOT_CHECKED",
             "ref_source": "advertised_by_test_remote",
             "dynamic_remote_ref_enumeration_required": true,
-            "disallow_static_expected_refs_as_evidence": true
+            "disallow_static_expected_refs_as_evidence": true,
+            "require_independent_reachable_commit_enumeration": true
           },
           "independent_proofs": [
             {
@@ -2364,8 +2380,13 @@
             "isolate_type": "separate_test_namespace",
             "expect_errno": "EACCES",
             "worker_uid": "synthetic-unprivileged",
-            "sentinel_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "require_preexisting_test_sentinel": true
+            "sentinel_sha256": "690134eb896288c86c184646bb2f9f3902349e8f8089f50bc05566026cbff023",
+            "require_preexisting_test_sentinel": true,
+            "sentinel_generator": {
+              "algorithm": "repeat_utf8_seed_v1",
+              "seed_utf8": "AIO-P01-SENTINEL-v1:/synthetic/supervisor-only/sentinel",
+              "size_bytes": 137
+            }
           },
           "independent_proofs": [
             {
@@ -2408,8 +2429,13 @@
             "isolate_type": "separate_test_namespace",
             "expect_errno": "EACCES",
             "worker_uid": "synthetic-unprivileged",
-            "sentinel_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "require_preexisting_test_sentinel": true
+            "sentinel_sha256": "3e9988888cea45d59172752e0b0c2ee8165bd3cc0ed6b719a7f10242bfdf265e",
+            "require_preexisting_test_sentinel": true,
+            "sentinel_generator": {
+              "algorithm": "repeat_utf8_seed_v1",
+              "seed_utf8": "AIO-P01-SENTINEL-v1:/synthetic/production-namespace/sentinel",
+              "size_bytes": 137
+            }
           },
           "independent_proofs": [
             {

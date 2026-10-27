@@ -93,7 +93,7 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
         raise ProbeError('NOT_CHECKED: malformed signed policy') from exc
     required={'schema','collector_sha256','collector_path','witness_key_path','git_sha',
               'sut_uid','sut_gid','runner_uid','authorized_by','scope',
-              'sut_command_sha256','sut_repo_path'}
+              'sut_command_sha256','sut_repo_path','sut_executable_sha256'}
     if not isinstance(data,dict) or not required <= set(data) or data['schema']!='aio.p01.owner_signed_collector_policy.v1':
         raise ProbeError('NOT_CHECKED: incomplete signed collector policy')
     if data['scope']!='P01-D5' or not data['authorized_by'] or data['git_sha']!=git_sha:
@@ -107,6 +107,8 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
             raise ProbeError('NOT_CHECKED: signed policy OS identity invalid')
     if not isinstance(data['sut_command_sha256'],str) or len(data['sut_command_sha256'])!=64:
         raise ProbeError('NOT_CHECKED: SUT command not pinned in signed policy')
+    if not isinstance(data['sut_executable_sha256'],str) or len(data['sut_executable_sha256'])!=64:
+        raise ProbeError('NOT_CHECKED: SUT executable bytes are not signed/pinned')
     if not Path(data['sut_repo_path']).is_absolute():
         raise ProbeError('NOT_CHECKED: SUT checkout not pinned by signed policy')
     if data['sut_uid']==data['runner_uid']:
@@ -171,6 +173,77 @@ def require_witness_key_isolation(key_path: Path, *, sut_uid: int, sut_gid: int)
     if child.returncode!=0:
         raise ProbeError('NOT_CHECKED: synthetic witness key OS denial not proven')
     return 'EACCES'
+
+
+def verify_sut_proc_identity(status_text: str, *, sut_uid: int, sut_gid: int, runner_uid: int) -> bool:
+    """Reject all privilege-bearing Linux credential IDs and supplementary groups."""
+    try:
+        lines = dict(line.split(':', 1) for line in status_text.splitlines() if ':' in line)
+        uids = [int(x) for x in lines['Uid'].split()]
+        gids = [int(x) for x in lines['Gid'].split()]
+        groups = [int(x) for x in lines['Groups'].split()]
+        cap_effective = int(lines['CapEff'].strip(), 16)
+        cap_permitted = int(lines['CapPrm'].strip(), 16)
+        cap_ambient = int(lines['CapAmb'].strip(), 16)
+        no_new_privs = int(lines['NoNewPrivs'].strip())
+    except (KeyError, ValueError, TypeError) as exc:
+        raise ProbeError('NOT_CHECKED: incomplete OS credentials') from exc
+    if (len(uids) != 4 or len(gids) != 4 or
+            any(uid != sut_uid or uid == runner_uid for uid in uids) or
+            any(gid != sut_gid for gid in gids) or
+            any(group in (0,) for group in groups) or
+            any((cap_effective, cap_permitted, cap_ambient)) or no_new_privs != 1):
+        raise ProbeError('NOT_CHECKED: SUT OS privilege escalation or mismatched credentials')
+    return True
+
+
+def verify_complete_git_history(advertised: dict[str,str], scanned: dict[str,str], *,
+                                verified_remote: bool, reachable_commits: dict[str,list[str]],
+                                scanned_commits: list[str], reachable_verified: bool) -> bool:
+    verify_scan_ref_coverage(advertised, scanned, verified_remote=verified_remote)
+    if (not reachable_verified or not isinstance(reachable_commits,dict) or
+            set(reachable_commits)!=set(advertised) or not isinstance(scanned_commits,list)):
+        raise ProbeError('NOT_CHECKED: independently enumerated reachable history absent')
+    commits=set()
+    for ref, ancestors in reachable_commits.items():
+        if (not isinstance(ancestors,list) or advertised[ref] not in ancestors or
+            any(not isinstance(x,str) or len(x)!=40 or any(c not in '0123456789abcdef' for c in x) for x in ancestors)):
+            raise ProbeError('NOT_CHECKED: invalid independently enumerated history')
+        commits.update(ancestors)
+    if set(scanned_commits)!=commits or len(scanned_commits)!=len(set(scanned_commits)):
+        raise ProbeError('NOT_CHECKED: not all reachable commits scanned')
+    return True
+
+
+def verify_synthetic_object_bytes(spec: dict, actual: bytes) -> bool:
+    """Fixture digest must be derived from deterministic bytes, never a decorative hex pattern."""
+    seed=spec.get('seed_utf8')
+    size=spec.get('size_bytes')
+    if not isinstance(seed,str) or not seed or type(size) is not int or size < 0:
+        raise ProbeError('NOT_CHECKED: synthetic bytes not reproducible')
+    data=seed.encode('utf-8')
+    digest=hashlib.sha256()
+    for _ in range(size//len(data)):
+        digest.update(data)
+    digest.update(data[:size%len(data)])
+    if len(actual) != size or hashlib.sha256(actual).hexdigest() != digest.hexdigest() or digest.hexdigest()!=spec.get('sha256'):
+        raise ProbeError('NOT_CHECKED: synthetic fixture digest not validated')
+    return True
+
+
+def verify_immutable_sut_checkout(repo: Path, expected_sha: str, argv: list[str], approved_executable_sha256: str) -> bool:
+    import subprocess
+    try:
+        head=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True,timeout=5).strip()
+        diff=subprocess.check_output(['git','-C',str(repo),'status','--porcelain','--untracked-files=all'],text=True,timeout=5)
+        check=subprocess.check_output(['git','-C',str(repo),'diff','--exit-code','HEAD'],timeout=5)
+    except (OSError,subprocess.SubprocessError) as exc:
+        raise ProbeError('NOT_CHECKED: cannot inspect immutable SUT tree') from exc
+    exe=Path(argv[0])
+    if (head!=expected_sha or diff.strip() or not exe.is_file() or
+            exe.is_symlink() or hashlib.sha256(exe.read_bytes()).hexdigest()!=approved_executable_sha256):
+        raise ProbeError('NOT_CHECKED: checkout/executable differs from signed approved bytes')
+    return True
 
 
 def verify_scan_ref_coverage(advertised: dict[str,str], scanned: dict[str,str],
@@ -369,9 +442,12 @@ def verify_independent_proofs(
         if observed.get('endpoint_listening_before_probe') is not True or observed.get('denial_due_to_network_os_policy') is not True:
             raise ProbeError('NOT_CHECKED: network OS policy denial on listening endpoint not proven')
     if case['synthetic_input'].get('operation')=='scan_git_tree_and_history':
-        verify_scan_ref_coverage(observed.get('remote_advertised_ref_sha'),
-                                 observed.get('scanned_ref_sha'),
-                                 verified_remote=observed.get('remote_refs_verified_by_collector') is True)
+        verify_complete_git_history(observed.get('remote_advertised_ref_sha'),
+                                    observed.get('scanned_ref_sha'),
+                                    verified_remote=observed.get('remote_refs_verified_by_collector') is True,
+                                    reachable_commits=observed.get('remote_reachable_commits'),
+                                    scanned_commits=observed.get('scanned_reachable_commits'),
+                                    reachable_verified=observed.get('reachable_history_verified_by_collector') is True)
     for key, expected in case['expected_observations'].items():
         if key not in observed:
             raise ProbeError(f'NOT_CHECKED: no independent observation for {key}')
@@ -383,29 +459,47 @@ def verify_independent_proofs(
     return observed
 
 
-def _load_pinned_collector(collector_file: Path, approved_sha256: str, workspace: Path):
-    """Only runner-configured, hash-pinned collectors outside SUT workspace."""
+def _load_pinned_collector(collector_file: Path, approved_sha256: str, workspace: Path,
+                           sut_uid: int | None = None):
+    """Fail closed unless root-owned collector and ancestry are not SUT-writable.
+
+    Imports from a root-controlled private immutable copy; no hash-to-import file race.
+    Real trust provenance still requires independent owner root provisioning.
+    """
+    import os
+    import tempfile
     path = collector_file.resolve(strict=True)
-    if path.is_relative_to(workspace.resolve()):
-        raise ProbeError('NOT_CHECKED: collector in SUT-writable workspace')
-    if _sha256(path.read_bytes()) != approved_sha256:
-        raise ProbeError('NOT_CHECKED: external collector digest mismatch')
-    if path.stat().st_mode & 0o022:
-        raise ProbeError('NOT_CHECKED: collector file writable by group/others')
-    spec = importlib.util.spec_from_file_location('aio_external_approved_test_collector', path)
-    if spec is None or spec.loader is None:
-        raise ProbeError('NOT_CHECKED: approved collector could not be imported')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    callback = getattr(module, 'collect', None)
+    if path.is_relative_to(workspace.resolve()) or path.is_symlink():
+        raise ProbeError('NOT_CHECKED: collector in SUT space')
+    for element in (path, *path.parents):
+        st=element.stat()
+        if st.st_uid != 0 or st.st_mode & 0o022 or (sut_uid is not None and st.st_uid==sut_uid):
+            raise ProbeError('NOT_CHECKED: collector/path not protected from SUT writes')
+    payload=path.read_bytes()
+    if _sha256(payload) != approved_sha256:
+        raise ProbeError('NOT_CHECKED: approved collector digest mismatch')
+    # The root-controlled approved directory must be provisioned out of band.
+    # Do not import from the original writable path after checking its hash.
+    with tempfile.TemporaryDirectory(prefix='aio-trusted-collector-') as temp:
+        if os.geteuid()!=0:
+            raise ProbeError('NOT_CHECKED: collector isolation requires privileged runner')
+        copy=Path(temp)/'pinned_collector.py'
+        copy.write_bytes(payload)
+        copy.chmod(0o400)
+        spec=importlib.util.spec_from_file_location('aio_external_approved_test_collector',copy)
+        if spec is None or spec.loader is None:
+            raise ProbeError('NOT_CHECKED: approved collector cannot be imported')
+        module=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    callback=getattr(module,'collect',None)
     if not callable(callback):
-        raise ProbeError('NOT_CHECKED: trusted collector lacks collect()')
+        raise ProbeError('NOT_CHECKED: approved collector lacks collect()')
     return callback
 
 
 def collect_trusted_evidence(*, synthetic_input: dict[str, Any], required_sources: list[str],
                              run: TestRun, collector_file: Path, collector_sha256: str,
-                             witness_key: bytes) -> dict[str, IndependentProof]:
+                             witness_key: bytes, sut_uid: int | None = None) -> dict[str, IndependentProof]:
     """Trusted runner calls independently pinned collector; never sends EXPECTED values.
 
     The plugin is a test-only integration seam. Real OS/CI/Git collectors must
@@ -416,7 +510,7 @@ def collect_trusted_evidence(*, synthetic_input: dict[str, Any], required_source
         raise ProbeError('NOT_CHECKED: witness authority absent')
     if run.collector_sha256 != collector_sha256:
         raise ProbeError('NOT_CHECKED: collector pin not bound to run')
-    collect = _load_pinned_collector(collector_file, collector_sha256, run.workspace)
+    collect = _load_pinned_collector(collector_file, collector_sha256, run.workspace, sut_uid=sut_uid)
     trusted_dir = run.workspace.parent / 'trusted_evidence'
     trusted_dir.mkdir(mode=0o700, exist_ok=False)
     if any(source not in _ALLOWED_WITNESS_SOURCES for source in required_sources):
