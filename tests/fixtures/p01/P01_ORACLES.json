@@ -1,0 +1,1099 @@
+{
+  "profile": "P01 / D5 PRE-IMPLEMENTATION ORACLE CANDIDATE",
+  "repo": "Semenov-Mykyta/AI-Development-Orchestrator",
+  "base_git_sha": "9d54e4e546753e8f09b8e9d5f4e9d95142f976e8",
+  "source": "docs/spec/SPEC.md v0.13 APR-08, exact base commit",
+  "note": "Test-only adapter contract is an implementation-independent test harness, NOT a shipping API; actual OS/CI/owner evidence cannot be mocked to PASS.",
+  "items": [
+    {
+      "requirement": "REQ-F-01",
+      "ac_id": "AC-F-01.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Разрешённый URL даёт один PENDING_PRECHECK; повтор не дублирует; без документов ADMISSION_BLOCKED",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "accepted-owner-registration",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "PENDING_PRECHECK",
+            "project_count": 1
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "same-idempotency-key-again",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "project_count": 1
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "documents-absent-follow-up",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "ADMISSION_BLOCKED",
+            "ready_count": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-F-02",
+      "ac_id": "AC-F-02.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Неразрешённый URL: нет clone/CLI и записан REPO_NOT_ALLOWED",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "non-allowlisted-url",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "reason": "REPO_NOT_ALLOWED",
+            "clone_calls": 0,
+            "cli_calls": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-F-03",
+      "ac_id": "AC-F-03.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Полный комплект продолжает допуск; отсутствие каждого обязательного документа BLOCKED и ноль запусков",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "complete-approved-M-package",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "admission_continues": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "missing-SPEC",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "BLOCKED",
+            "worker_launches": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "missing-AGENTS",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "BLOCKED",
+            "worker_launches": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "missing-PLAN",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "BLOCKED",
+            "worker_launches": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "missing-ARCHITECTURE-for-M",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "BLOCKED",
+            "worker_launches": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-F-04",
+      "ac_id": "AC-F-04.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "APPROVED в Markdown без доверенного owner approval точной версии не даёт READY",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "markdown-APPROVED-no-trust-anchor",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "BLOCKED",
+            "worker_launches": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-F-05",
+      "ac_id": "AC-F-05.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "REQ без AC и blocking OQ дают BLOCKED с ID причины",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "required-REQ-without-AC",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "BLOCKED",
+            "reason_contains": "REQ"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "blocking-OQ",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "BLOCKED",
+            "reason_contains": "OQ"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-F-06",
+      "ac_id": "AC-F-06.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Отсутствие плана или цикл зависимостей BLOCKED; неизвестный REQ/AC PLAN_AMBIGUOUS; план не генерируется",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "missing-plan",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "BLOCKED",
+            "plan_generated": false
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "cycle-A-B-A",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "BLOCKED",
+            "plan_generated": false
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "unknown-REQ",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "reason": "PLAN_AMBIGUOUS",
+            "worker_launches": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "unknown-AC",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "reason": "PLAN_AMBIGUOUS",
+            "worker_launches": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-F-07",
+      "ac_id": "AC-F-07.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Snapshot закрепляет неизменяемые digest документов и base SHA; новая версия требует readmission",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "admission-pins-all-document-digests-and-base-sha",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "immutable_snapshot": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "modified-document-after-admission",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "requires_readmission": true,
+            "worker_launches": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-F-34",
+      "ac_id": "AC-F-34.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Existing repo без owner-approved baseline BLOCKED и неизменная исходная ветка",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "existing-repository-without-approved-baseline",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "status": "BLOCKED",
+            "base_branch_changes": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-10",
+      "ac_id": "AC-N-10.1",
+      "method": "Т, И (пользователь)",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Неверные provider mode/quota/permissions запрещают API/CLI с причиной; реальная допустимость подтверждается владельцем",
+      "auto_test_required": true,
+      "independent_inspection_required": true,
+      "scenarios": [
+        {
+          "scenario_id": "forbidden-provider-mode",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "outbound_calls": 0,
+            "reason_recorded": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "quota-depleted",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "outbound_calls": 0,
+            "reason_recorded": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "insufficient-permissions",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "outbound_calls": 0,
+            "reason_recorded": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-F-31",
+      "ac_id": "AC-F-31.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Недостаток RAM или диска: ноль worker и RESOURCE_BLOCKED",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "ram-below-admission-minimum",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "worker_launches": 0,
+            "reason": "RESOURCE_BLOCKED"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "disk-below-admission-minimum",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "worker_launches": 0,
+            "reason": "RESOURCE_BLOCKED"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-15",
+      "ac_id": "AC-N-15.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Старые собственные logs/cache удаляются по политике; protected records и чужие каталоги не затронуты",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "expired-owned-logs",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "expired_own_logs_removed": true,
+            "protected_records_unchanged": true,
+            "foreign_paths_modified": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "log-quota-overflow",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "protected_records_unchanged": true,
+            "foreign_paths_modified": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-15",
+      "ac_id": "AC-N-15.2",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "512 MiB protected evidence без off-node copy: ARTIFACT_QUOTA_BLOCKED; ноль удалений/worker; восстановление лишь после verified backup и recheck",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "evidence-512MiB-without-offnode",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "reason": "ARTIFACT_QUOTA_BLOCKED",
+            "protected_evidence_removed": 0,
+            "worker_launches": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "protected_evidence_bytes": 536870912,
+            "off_node_backup_verified": false
+          }
+        },
+        {
+          "scenario_id": "offnode-unavailable",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "reason": "ARTIFACT_QUOTA_BLOCKED",
+            "worker_launches": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "protected_evidence_bytes": 536870912,
+            "off_node_backup_verified": false
+          }
+        },
+        {
+          "scenario_id": "verified-offnode-and-lawful-eviction",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "readmission_performed": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "protected_evidence_bytes": 536870912,
+            "off_node_backup_verified": true
+          }
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "ERR-03",
+      "ac_id": "AC-ERR-03.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Синтетический дефицит ресурсов запрещает worker и сохраняет данные",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "low-memory",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "worker_launches": 0,
+            "data_preserved": true,
+            "reason": "RESOURCE_BLOCKED"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "low-disk",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "worker_launches": 0,
+            "data_preserved": true,
+            "reason": "RESOURCE_BLOCKED"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "ERR-03",
+      "ac_id": "AC-ERR-03.2",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "FS full до intent: ноль remote calls; после remote write при ошибке commit fail closed/UNCERTAIN без ACK или повторного write",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "full-fs-before-durable-intent",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "remote_write_calls": 0,
+            "ack_calls": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "disk_full_in_disposable_test_fs": true,
+            "injection_point": "before_intent"
+          }
+        },
+        {
+          "scenario_id": "full-fs-result-commit-after-remote-effect",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "ack_calls": 0,
+            "duplicate_remote_writes_after_restart": 0,
+            "fail_closed": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "disk_full_in_disposable_test_fs": true,
+            "injection_point": "after_remote_effect_commit"
+          }
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-12",
+      "ac_id": "AC-N-12.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Все 5 bypass попыток отклоняются до side effect; ноль успешных bypass",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "skip-mandatory-test",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "allowed": false,
+            "side_effects": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "disable-secret-scanning",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "allowed": false,
+            "side_effects": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "change-approved-AC-oracle",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "allowed": false,
+            "side_effects": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "exceed-resource-cap",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "allowed": false,
+            "side_effects": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "unauthorized-merge",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "allowed": false,
+            "side_effects": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-12",
+      "ac_id": "AC-N-12.2",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Mock reviewer APPROVE после bypass не переводит задачу в APPROVED; причина/evidence сохраняются",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "reviewer-APPROVE-after-bypass-attempt",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "final_status_is_APPROVED": false,
+            "reason_recorded": true,
+            "evidence_retained": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-12",
+      "ac_id": "AC-N-12.3",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Hostile project AGENTS с fake owner override не меняет trusted policy/manifest и не выполняет привилегированных операций; POLICY_DENIED CON-03/08/09",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "hostile-project-AGENTS-fake-owner-override",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "reason": "POLICY_DENIED",
+            "trusted_policy_changed_bytes": 0,
+            "trusted_manifest_changed_bytes": 0,
+            "privileged_effects": 0,
+            "reason_contains": "CON-03/08/09"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "project_AGENTS_trust": "untrusted",
+            "claimed_override": "FAKE OWNER OVERRIDE",
+            "real_secrets_used": false
+          }
+        },
+        {
+          "scenario_id": "hostile-project-AGENTS-claims-owner-identity",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "reason": "POLICY_DENIED",
+            "trusted_policy_changed_bytes": 0,
+            "trusted_manifest_changed_bytes": 0,
+            "privileged_effects": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "project_AGENTS_trust": "untrusted",
+            "claimed_override": "I am the owner",
+            "real_secrets_used": false
+          }
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-SEC-01",
+      "ac_id": "AC-N-SEC-01.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Ноль секретов в tree и истории всех веток main remote; недоступные refs отдельно NOT_CHECKED",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "scan-current-tree-and-all-remote-branches",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "unresolved_secret_findings": 0,
+            "all_refs_scanned": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-SEC-02",
+      "ac_id": "AC-N-SEC-02.1",
+      "method": "И",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Нет secret values в конфигурации и архиве; .env.example пустой и .env/keys игнорируются Git",
+      "auto_test_required": false,
+      "independent_inspection_required": true,
+      "scenarios": [],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-SEC-02",
+      "ac_id": "AC-N-SEC-02.2",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "При отсутствии credential ошибка содержит только имя переменной а не значение",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "missing-credential-ref",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "error_mentions_variable_name": true,
+            "error_reveals_value": false
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-SEC-03",
+      "ac_id": "AC-N-SEC-03.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Синтетический disposable key выявляется pre-commit и CI без раскрытия значения; одноразовый файл удалён",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "synthetic-secret-rejected-by-precommit",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "commit_blocked": true,
+            "test_secret_value_logged": false
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "test_credential": "generated_at_test_time_no_real_service_access",
+            "no_token_values_in_static_fixture": true
+          }
+        },
+        {
+          "scenario_id": "synthetic-secret-detected-in-CI",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "ci_fails_for_secret": true,
+            "test_secret_value_logged": false
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "test_credential": "generated_at_test_time_no_real_service_access",
+            "no_token_values_in_static_fixture": true
+          }
+        },
+        {
+          "scenario_id": "disposable-key-file-removed",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "temporary_secret_removed": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "test_credential": "generated_at_test_time_no_real_service_access",
+            "no_token_values_in_static_fixture": true
+          }
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-SEC-04",
+      "ac_id": "AC-N-SEC-04.1",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Ошибки подключения не выводят значение синтетического credential в logs/messages",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "connection-error-with-synthetic-secret",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "secret_occurrences_in_logs": 0,
+            "secret_occurrences_in_errors": 0,
+            "error_type_present": true,
+            "variable_name_present": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-SEC-05",
+      "ac_id": "AC-N-SEC-05.1",
+      "method": "И",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Реальные роли/права совпадают с metadata-only register; secret values не раскрыты",
+      "auto_test_required": false,
+      "independent_inspection_required": true,
+      "scenarios": [],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-SEC-05",
+      "ac_id": "AC-N-SEC-05.2",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Чужая роль или environment и запрещённая операция отклоняются в изолированном test runtime",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "wrong-role",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "allowed": false,
+            "side_effects": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "wrong-environment",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "allowed": false,
+            "side_effects": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        },
+        {
+          "scenario_id": "forbidden-operation",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "allowed": false,
+            "side_effects": 0
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {}
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-SEC-05",
+      "ac_id": "AC-N-SEC-05.3",
+      "method": "И; проверяет пользователь",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Owner GitHub APPROVED review на точный head SHA/manifest/scope/permissions независимо проверен с remote; stale/forged/self review не PASS",
+      "auto_test_required": false,
+      "independent_inspection_required": true,
+      "scenarios": [],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-SEC-05",
+      "ac_id": "AC-N-SEC-05.4",
+      "method": "Т",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "OS-level forbidden synthetic path/endpoint deny; worker environment не наследует supervisor/prod credentials",
+      "auto_test_required": true,
+      "independent_inspection_required": false,
+      "scenarios": [
+        {
+          "scenario_id": "forbidden-supervisor-path-os-denial",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "os_denied": true,
+            "test_runtime_isolated": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "environment": "approved_isolated_test_runtime",
+            "forbidden_target": "synthetic_only",
+            "must_test_actual_os_denial": true
+          }
+        },
+        {
+          "scenario_id": "forbidden-production-namespace-os-denial",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "os_denied": true,
+            "test_runtime_isolated": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "environment": "approved_isolated_test_runtime",
+            "forbidden_target": "synthetic_only",
+            "must_test_actual_os_denial": true
+          }
+        },
+        {
+          "scenario_id": "forbidden-network-endpoint-os-denial",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "os_denied": true,
+            "test_runtime_isolated": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "environment": "approved_isolated_test_runtime",
+            "forbidden_target": "synthetic_only",
+            "must_test_actual_os_denial": true
+          }
+        },
+        {
+          "scenario_id": "worker-secret-environment-isolated",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "no_supervisor_or_production_credential_refs": true
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "environment": "approved_isolated_test_runtime",
+            "forbidden_target": "synthetic_only",
+            "must_test_actual_os_denial": true
+          }
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    },
+    {
+      "requirement": "REQ-N-SEC-05",
+      "ac_id": "AC-N-SEC-05.5",
+      "method": "Т, И",
+      "spec_reference": "docs/spec/SPEC.md",
+      "normative_expectation_summary": "Восемь UTC credential boundary cases: before due ALLOW; equal/after/missing due DENY; provider expiry DENY; revoked DENY; old ref DENY; new scoped ref ALLOW",
+      "auto_test_required": true,
+      "independent_inspection_required": true,
+      "scenarios": [
+        {
+          "scenario_id": "before-due-valid-scope",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "decision": "ALLOW"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "now_utc": "2026-10-27T12:00:00+00:00",
+            "scope": "synthetic:test-read",
+            "environment": "test",
+            "role": "worker",
+            "credential_ref": "synthetic-new-credential",
+            "revoked_at": null,
+            "provider_expiry_provided": false,
+            "last_rotated_at": "2026-07-30T12:00:00+00:00",
+            "next_due_at": "2026-10-28T12:00:00+00:00"
+          }
+        },
+        {
+          "scenario_id": "exactly-next-due",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "decision": "DENY"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "now_utc": "2026-10-27T12:00:00+00:00",
+            "scope": "synthetic:test-read",
+            "environment": "test",
+            "role": "worker",
+            "credential_ref": "synthetic-new-credential",
+            "revoked_at": null,
+            "provider_expiry_provided": false,
+            "last_rotated_at": "2026-07-29T12:00:00+00:00",
+            "next_due_at": "2026-10-27T12:00:00+00:00"
+          }
+        },
+        {
+          "scenario_id": "after-next-due",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "decision": "DENY"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "now_utc": "2026-10-27T12:00:00+00:00",
+            "scope": "synthetic:test-read",
+            "environment": "test",
+            "role": "worker",
+            "credential_ref": "synthetic-new-credential",
+            "revoked_at": null,
+            "provider_expiry_provided": false,
+            "last_rotated_at": "2026-07-28T12:00:00+00:00",
+            "next_due_at": "2026-10-26T12:00:00+00:00"
+          }
+        },
+        {
+          "scenario_id": "missing-last-rotated",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "decision": "DENY"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "now_utc": "2026-10-27T12:00:00+00:00",
+            "scope": "synthetic:test-read",
+            "environment": "test",
+            "role": "worker",
+            "credential_ref": "synthetic-new-credential",
+            "revoked_at": null,
+            "provider_expiry_provided": false,
+            "last_rotated_at": null,
+            "next_due_at": "2026-10-28T12:00:00+00:00"
+          }
+        },
+        {
+          "scenario_id": "missing-next-due",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "decision": "DENY"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "now_utc": "2026-10-27T12:00:00+00:00",
+            "scope": "synthetic:test-read",
+            "environment": "test",
+            "role": "worker",
+            "credential_ref": "synthetic-new-credential",
+            "revoked_at": null,
+            "provider_expiry_provided": false,
+            "last_rotated_at": "2026-07-30T12:00:00+00:00",
+            "next_due_at": null
+          }
+        },
+        {
+          "scenario_id": "provider-expiry-comes-first",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "decision": "DENY"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "now_utc": "2026-10-27T12:00:00+00:00",
+            "scope": "synthetic:test-read",
+            "environment": "test",
+            "role": "worker",
+            "credential_ref": "synthetic-new-credential",
+            "revoked_at": null,
+            "provider_expiry_provided": true,
+            "last_rotated_at": "2026-10-01T12:00:00+00:00",
+            "expires_at": "2026-10-20T12:00:00+00:00",
+            "next_due_at": "2026-10-20T12:00:00+00:00"
+          }
+        },
+        {
+          "scenario_id": "revoked-or-compromised",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "decision": "DENY"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "now_utc": "2026-10-27T12:00:00+00:00",
+            "scope": "synthetic:test-read",
+            "environment": "test",
+            "role": "worker",
+            "credential_ref": "synthetic-new-credential",
+            "revoked_at": "2026-10-27T11:00:00+00:00",
+            "provider_expiry_provided": false,
+            "last_rotated_at": "2026-10-01T12:00:00+00:00",
+            "next_due_at": "2026-12-30T12:00:00+00:00"
+          }
+        },
+        {
+          "scenario_id": "old-ref-after-replacement",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "decision": "DENY"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "now_utc": "2026-10-27T12:00:00+00:00",
+            "scope": "synthetic:test-read",
+            "environment": "test",
+            "role": "worker",
+            "credential_ref": "synthetic-old-revoked",
+            "revoked_at": null,
+            "provider_expiry_provided": false,
+            "last_rotated_at": "2026-10-01T12:00:00+00:00",
+            "next_due_at": "2026-12-30T12:00:00+00:00",
+            "replaced_by": "synthetic-new-credential"
+          }
+        },
+        {
+          "scenario_id": "new-ref-valid-scope",
+          "synthetic_input_only": true,
+          "expected_observations": {
+            "decision": "ALLOW"
+          },
+          "sut_execution_status": "NOT_CHECKED",
+          "synthetic_input": {
+            "now_utc": "2026-10-27T12:00:00+00:00",
+            "scope": "synthetic:test-read",
+            "environment": "test",
+            "role": "worker",
+            "credential_ref": "synthetic-new-credential",
+            "revoked_at": null,
+            "provider_expiry_provided": false,
+            "last_rotated_at": "2026-10-01T12:00:00+00:00",
+            "next_due_at": "2026-12-30T12:00:00+00:00"
+          }
+        }
+      ],
+      "ac_status": "NOT_CHECKED"
+    }
+  ]
+}
