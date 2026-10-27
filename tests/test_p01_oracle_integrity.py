@@ -71,3 +71,15 @@ def test_d5_credential_clock_boundary_is_exact_utc_not_rounded():
     assert datetime.fromisoformat(by_name["exactly-next-due"]["synthetic_input"]["next_due_at"])==datetime.fromisoformat(by_name["exactly-next-due"]["synthetic_input"]["now_utc"])
     assert by_name["exactly-next-due"]["expected_observations"]["decision"]=="DENY"
     assert by_name["before-due-valid-scope"]["expected_observations"]["decision"]=="ALLOW"
+
+
+def test_d5_frozen_candidate_fixture_digest():
+    """Flags ANY fixture mutation after this review candidate snapshot.
+
+    D5 Reviewer must independently inspect expected values against normative SPEC;
+    this hash only catches accidental/post-review edits, not semantic correctness.
+    """
+    import hashlib
+    value=load()
+    canonical=json.dumps(value['items'],sort_keys=True,ensure_ascii=False,separators=(',',':')).encode('utf8')
+    assert hashlib.sha256(canonical).hexdigest()=="8a3e37ecda34f18199dcc812ae9baed43f42e667fd60b863dfabfd61542f3ce3"
