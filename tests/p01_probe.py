@@ -11,6 +11,10 @@ import hmac
 import importlib.util
 import os
 import stat
+import socket
+import subprocess
+import sys
+import time
 from contextlib import contextmanager
 import json
 from dataclasses import dataclass
@@ -98,7 +102,8 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
               'sut_uid','sut_gid','runner_uid','authorized_by','scope',
               'sut_command_sha256','sut_repo_path','sut_executable_sha256',
               'sut_launch_mode','sut_components_sha256','git_scan_mirror_path','git_test_remote_url',
-              'synthetic_root_path'}
+              'synthetic_root_path','kernel_monitor_id','kernel_monitor_public_key_path',
+              'kernel_monitor_public_key_sha256','kernel_monitor_socket_path'}
     if not isinstance(data,dict) or not required <= set(data) or data['schema']!='aio.p01.owner_signed_collector_policy.v1':
         raise ProbeError('NOT_CHECKED: incomplete signed collector policy')
     if data['scope']!='P01-D5' or not data['authorized_by'] or data['git_sha']!=git_sha:
@@ -130,6 +135,13 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
         raise ProbeError('NOT_CHECKED: independently approved test remote URL missing')
     if not isinstance(data['synthetic_root_path'],str) or data['synthetic_root_path']!='/synthetic':
         raise ProbeError('NOT_CHECKED: approved test-only synthetic namespace missing')
+    if (not isinstance(data['kernel_monitor_id'],str) or not data['kernel_monitor_id'] or
+            not isinstance(data['kernel_monitor_public_key_sha256'],str) or
+            len(data['kernel_monitor_public_key_sha256']) != 64 or
+            not all(ch in '0123456789abcdef' for ch in data['kernel_monitor_public_key_sha256']) or
+            not all(isinstance(data[k],str) and Path(data[k]).is_absolute() for k in
+                    ('kernel_monitor_public_key_path','kernel_monitor_socket_path'))):
+        raise ProbeError('NOT_CHECKED: independently pinned kernel monitor authority missing')
     if data['sut_uid']==data['runner_uid']:
         raise ProbeError('NOT_CHECKED: signed policy selects same OS identity')
     if not Path(data['witness_key_path']).is_absolute():
@@ -626,15 +638,183 @@ def open_pinned_launch(argv: list[str], approved_components_sha256: dict[str,str
             os.close(fd)
 
 
+def _monitor_public_key(payload: bytes):
+    """Monitor key is NOT the runner's HMAC key or the collector signing key."""
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        key=load_pem_public_key(payload)
+        if not isinstance(key,Ed25519PublicKey):
+            raise ValueError('monitor authority must be Ed25519')
+        return key
+    except (ImportError,ValueError) as exc:
+        raise ProbeError('NOT_CHECKED: monitor authority key unavailable') from exc
+
+
+def load_kernel_monitor_authority(policy: dict, *, sut_uid: int):
+    """Independent, owner-signed monitor key. Never load from the SUT workspace.
+
+    A deployed OQ-09/A runner must provision the monitor *private* key outside
+    both SUT and collector; this code does not create any monitor authority.
+    """
+    path=Path(policy['kernel_monitor_public_key_path'])
+    digest=policy['kernel_monitor_public_key_sha256']
+    try:
+        if not path.is_absolute() or path.is_symlink():
+            raise ProbeError('NOT_CHECKED: mutable monitor key path')
+        for directory in (path.parent,*path.parent.parents):
+            st=directory.lstat()
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid!=0 or st.st_mode & 0o022:
+                raise ProbeError('NOT_CHECKED: monitor public key parent writable')
+        st=path.lstat()
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid!=0 or st.st_uid==sut_uid or st.st_mode & 0o022):
+            raise ProbeError('NOT_CHECKED: monitor public key not root-controlled')
+        content=path.read_bytes()
+    except OSError as exc:
+        raise ProbeError('NOT_CHECKED: monitor public key not provisioned') from exc
+    if _sha256(content)!=digest:
+        raise ProbeError('NOT_CHECKED: monitor public key fingerprint mismatch')
+    return _monitor_public_key(content)
+
+
+def verify_monitor_receipt(receipt: dict, signature: str, public_key, *,
+                           expected_schema: str, expected_monitor_id: str,
+                           expected_run_id: str, expected_git_sha: str,
+                           expected_command_digest: str) -> dict:
+    """Separate ED25519 authority; a self-reported flag or witness HMAC cannot pass."""
+    if (not isinstance(receipt,dict) or
+            receipt.get('schema')!=expected_schema or
+            receipt.get('monitor_id')!=expected_monitor_id or
+            receipt.get('run_id')!=expected_run_id or
+            receipt.get('git_sha')!=expected_git_sha or
+            receipt.get('command_digest')!=expected_command_digest or
+            not isinstance(signature,str)):
+        raise ProbeError('NOT_CHECKED: kernel monitor receipt not bound to approved run')
+    try:
+        public_key.verify(bytes.fromhex(signature),_canonical(receipt))
+    except Exception as exc:
+        # No signature or signature using collector's own key is never enough.
+        raise ProbeError('NOT_CHECKED: independent kernel monitor signature invalid') from exc
+    return receipt
+
+
+def arm_monitor_session(*, socket_path: Path, monitor_public_key, monitor_id: str,
+                        run_id: str, git_sha: str, command_digest: str,
+                        sut_uid: int) -> dict:
+    """A dedicated kernel-monitor sidecar must ACK before the first SUT Popen.
+
+    This method is only a client contract. No monitor is supplied or assumed.
+    Sidecar must observe the approved cgroup/namespace, all descendants and
+    imports and hold the separate monitor private signing key outside SUT.
+    """
+    try:
+        st=socket_path.lstat()
+        if (not stat.S_ISSOCK(st.st_mode) or st.st_uid!=0 or st.st_uid==sut_uid or
+                st.st_mode & 0o022):
+            raise ProbeError('NOT_CHECKED: monitor socket not root-controlled')
+        request={'schema':'aio.p01.monitor_arm_request.v1','monitor_id':monitor_id,
+                 'run_id':run_id,'git_sha':git_sha,'command_digest':command_digest}
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as connection:
+            connection.settimeout(5)
+            connection.connect(str(socket_path))
+            connection.sendall(_canonical(request)+b'\n')
+            received=bytearray()
+            while not received.endswith(b'\n'):
+                chunk=connection.recv(4096)
+                if not chunk or len(received)+len(chunk)>16384:
+                    raise ProbeError('NOT_CHECKED: monitor did not attest ready session')
+                received.extend(chunk)
+        response=json.loads(received)
+        receipt=verify_monitor_receipt(response['receipt'],response['signature'],monitor_public_key,
+                        expected_schema='aio.p01.kernel_monitor_armed.v1',
+                        expected_monitor_id=monitor_id,expected_run_id=run_id,
+                        expected_git_sha=git_sha,expected_command_digest=command_digest)
+        if (receipt.get('coverage_scope')!='all_sut_descendants' or
+                not isinstance(receipt.get('monitor_session_id'),str) or not receipt['monitor_session_id'] or
+                type(receipt.get('armed_monotonic_ns')) is not int or
+                receipt['armed_monotonic_ns']<=0 or receipt['armed_monotonic_ns']>time.monotonic_ns()):
+            raise ProbeError('NOT_CHECKED: monitor not armed before SUT')
+        return response  # preserve the detached signature for independent recheck
+    except (OSError,ValueError,KeyError,TypeError) as exc:
+        raise ProbeError('NOT_CHECKED: independent monitor session unavailable') from exc
+
+
+def verify_monitor_session(ready_envelope: dict | None, monitor_public_key, *,
+                           launch_monotonic_ns: int, expected_run_id: str,
+                           expected_monitor_id: str, expected_git_sha: str,
+                           expected_command_digest: str) -> dict:
+    """Reverify monitor-signed PRE-LAUNCH ACK at the final global PASS gate."""
+    if not isinstance(ready_envelope,dict) or monitor_public_key is None:
+        raise ProbeError('NOT_CHECKED: independent pre-launch monitor receipt missing')
+    receipt=verify_monitor_receipt(ready_envelope.get('receipt'),ready_envelope.get('signature'),
+                   monitor_public_key,expected_schema='aio.p01.kernel_monitor_armed.v1',
+                   expected_monitor_id=expected_monitor_id,expected_run_id=expected_run_id,
+                   expected_git_sha=expected_git_sha,
+                   expected_command_digest=expected_command_digest)
+    if (receipt.get('coverage_scope')!='all_sut_descendants' or
+            not isinstance(receipt.get('monitor_session_id'),str) or not receipt['monitor_session_id'] or
+            type(receipt.get('armed_monotonic_ns')) is not int or
+            receipt['armed_monotonic_ns']<=0 or receipt['armed_monotonic_ns']>=launch_monotonic_ns or
+            not receipt.get('monitor_boot_id')):
+        raise ProbeError('NOT_CHECKED: monitor not armed before first SUT exec')
+    return receipt
+
+def verify_execution_ancestry(events: list[dict], *,
+                              roots: tuple[int,...], observed_pids: tuple[int,...]) -> bool:
+    """Check the signed kernel event graph, not merely equality of PID sets."""
+    if not roots or not events or not observed_pids:
+        raise ProbeError('NOT_CHECKED: missing monitored process graph')
+    lookup={}
+    for event in events:
+        if (not isinstance(event,dict) or type(event.get('pid')) is not int or
+                event['pid']<=0 or event['pid'] in lookup or
+                type(event.get('start_monotonic_ns')) is not int or
+                event['start_monotonic_ns']<=0):
+            raise ProbeError('NOT_CHECKED: incomplete kernel exec event identity')
+        lookup[event['pid']]=event
+    if (set(lookup)!=set(observed_pids) or not set(roots)<=set(lookup)):
+        raise ProbeError('NOT_CHECKED: kernel process graph incomplete')
+    for pid,event in lookup.items():
+        if pid in roots: continue
+        ppid=event.get('ppid')
+        if type(ppid) is not int or ppid not in lookup or ppid==pid:
+            raise ProbeError('NOT_CHECKED: child without independently observed parent')
+        if lookup[ppid]['start_monotonic_ns']>event['start_monotonic_ns']:
+            raise ProbeError('NOT_CHECKED: impossible kernel ancestry timeline')
+        ancestors=set()
+        curr=pid
+        while curr not in roots:
+            if curr in ancestors:
+                raise ProbeError('NOT_CHECKED: cyclic kernel process ancestry')
+            ancestors.add(curr)
+            curr=lookup[curr].get('ppid')
+            if curr not in lookup:
+                raise ProbeError('NOT_CHECKED: disconnected process ancestry')
+    return True
+
+
 def verify_execution_closure(capture: dict[str,Any], *,
                              approved_components_sha256: dict[str,str],
-                             process_pids: tuple[int,...]) -> bool:
-    """Global mandatory OS exec/import-trace gate before ANY P01 runtime PASS.
+                             process_pids: tuple[int,...],
+                             monitor_public_key=None, monitor_ready_receipt=None,
+                             monitor_id: str | None = None,
+                             run_id: str | None = None,
+                             git_sha: str | None = None,
+                             command_digest: str | None = None,
+                             launch_monotonic_ns: int | None = None) -> bool:
+    """Fail-closed external kernel-audit attestation for EVERY runtime AC.
 
-    The capture MUST originate from an authenticated independent kernel/audit
-    collector. A SUT-controlled dict or an uninstalled monitor cannot satisfy
-    the witness/provenance checks of verify_independent_proofs.
+    The runner witness HMAC authenticates a *collector report*, not kernel
+    provenance. This gate needs an independent monitor Ed25519 receipt as well
+    as the signed PRE-LAUNCH ready session. No monitor => NOT_CHECKED.
     """
+    if (not monitor_public_key or not monitor_id or not run_id or not git_sha or
+            not command_digest or type(launch_monotonic_ns) is not int):
+        raise ProbeError('NOT_CHECKED: separately attested kernel monitor authority missing')
+    ready=verify_monitor_session(monitor_ready_receipt,monitor_public_key,
+                           launch_monotonic_ns=launch_monotonic_ns,expected_run_id=run_id,
+                           expected_monitor_id=monitor_id,expected_git_sha=git_sha,
+                           expected_command_digest=command_digest)
     if (not isinstance(capture,dict) or capture.get('trace_source')!='kernel_execve' or
             capture.get('trace_complete') is not True or
             capture.get('monitor_installed_outside_sut') is not True or
@@ -651,11 +831,9 @@ def verify_execution_closure(capture: dict[str,Any], *,
     observed_pids=capture.get('observed_pids')
     if (not process_pids or not isinstance(events,list) or not events or not isinstance(loads,list) or
             not isinstance(observed_pids,list) or not observed_pids or
-            any(type(p) is not int or p<=0 for p in observed_pids) or
-            set(process_pids)-set(observed_pids)):
+            any(type(p) is not int or p<=0 for p in observed_pids)):
         raise ProbeError('NOT_CHECKED: missing complete tracked process ancestry')
-    if {e.get('pid') for e in events if isinstance(e,dict)}!=set(observed_pids):
-        raise ProbeError('NOT_CHECKED: observed descendants lack execve events')
+    verify_execution_ancestry(events,roots=process_pids,observed_pids=tuple(observed_pids))
     if not isinstance(approved_components_sha256,dict) or not approved_components_sha256:
         raise ProbeError('NOT_CHECKED: signed runtime component closure missing')
     for event in events+loads:
@@ -664,8 +842,60 @@ def verify_execution_closure(capture: dict[str,Any], *,
                 not isinstance(event.get('executable_sha256'),str) or
                 approved_components_sha256[event['executable_path']]!=event['executable_sha256']):
             raise ProbeError('NOT_CHECKED: unsigned descendant exec/import component')
+    # Each load must be tied to a monitored process (not merely a plausible SHA).
+    if any(type(load.get('pid')) is not int or load['pid'] not in observed_pids for load in loads):
+        raise ProbeError('NOT_CHECKED: loaded component not bound to monitored process')
+    attested=capture.get('monitor_stopped_receipt')
+    sig=capture.get('monitor_stopped_signature')
+    attested=verify_monitor_receipt(attested,sig,monitor_public_key,
+                   expected_schema='aio.p01.kernel_monitor_stopped.v1',
+                   expected_monitor_id=monitor_id,expected_run_id=run_id,
+                   expected_git_sha=git_sha,expected_command_digest=command_digest)
+    expected_event_digest=_sha256(_canonical({'execve_events':events,'loaded_file_events':loads,
+                                                'observed_pids':observed_pids,
+                                                'kernel_event_drops':capture['kernel_event_drops']}))
+    if (attested.get('monitor_session_id')!=ready.get('monitor_session_id') or
+            attested.get('event_sha256')!=expected_event_digest or
+            attested.get('monitor_boot_id')!=ready.get('monitor_boot_id') or
+            not attested.get('monitor_boot_id') or
+            attested.get('coverage_scope')!='all_sut_descendants' or
+            attested.get('monitor_isolated_from_sut') is not True or
+            attested.get('monitor_loss_counter_from_kernel') is not True or
+            attested.get('kernel_event_drops')!=0 or
+            attested.get('uninterrupted_coverage') is not True or
+            attested.get('all_descendants_exited') is not True or
+            attested.get('file_load_coverage_complete') is not True or
+            attested.get('unmonitored_dynamic_loads') != 0 or
+            attested.get('unobserved_executable_memory') != 0 or
+            type(attested.get('first_exec_monotonic_ns')) is not int or
+            type(attested.get('last_exit_monotonic_ns')) is not int or
+            type(attested.get('stopped_monotonic_ns')) is not int or
+            not (ready['armed_monotonic_ns'] < launch_monotonic_ns <=
+                 attested['first_exec_monotonic_ns'] <= attested['last_exit_monotonic_ns'] <=
+                 attested['stopped_monotonic_ns'])):
+        raise ProbeError('NOT_CHECKED: monitor proof is not real complete run coverage')
     return True
 
+
+def require_pinned_script_access(pinned, *, sut_uid: int, sut_gid: int) -> bool:
+    """Actual OS open probe of the already pinned Python script as SUT UID/GID.
+
+    Root-owned 0600 script otherwise passes hash preflight but fails when Python
+    opens /proc/self/fd/N from the downgraded SUT. Not an SUT test failure.
+    """
+    if len(pinned.pass_fds)!=2: return True  # Direct ELF has no script FD.
+    script_fd=pinned.pass_fds[1]
+    snippet=('import os,sys; p=sys.argv[1]; fd=os.open(p,os.O_RDONLY); os.close(fd)')
+    try:
+        result=subprocess.run([sys.executable,'-I','-S','-c',snippet,f'/proc/self/fd/{script_fd}'],
+                              user=sut_uid,group=sut_gid,extra_groups=[],
+                              pass_fds=(script_fd,),timeout=5,capture_output=True,
+                              env={'PATH':'/usr/bin:/bin'})
+    except (OSError,subprocess.SubprocessError) as exc:
+        raise ProbeError('NOT_CHECKED: script SUT accessibility cannot be measured') from exc
+    if result.returncode!=0:
+        raise ProbeError('NOT_CHECKED: pinned Python script unreadable by approved SUT identity')
+    return True
 
 def verify_scan_ref_coverage(advertised: dict[str,str], scanned: dict[str,str],
                              *, verified_remote: bool) -> bool:

@@ -96,7 +96,9 @@ def test_042_complete_independent_exec_trace_positive_and_mutations():
           'execve_events':[{'pid':100,'executable_path':'/safe/main','executable_sha256':'a'*64},
                            {'pid':101,'ppid':100,'executable_path':'/safe/loader','executable_sha256':'b'*64}],
           'loaded_file_events':[]}
-    assert verify_execution_closure(base, approved_components_sha256=approved, process_pids=(100,))
+    # TENTH-D5-043: unsigned fake kernel flags are no longer a positive test.
+    with pytest.raises(ProbeError,match='NOT_CHECKED'):
+        verify_execution_closure(base, approved_components_sha256=approved, process_pids=(100,))
     for patch in ({'trace_complete':False}, {'kernel_event_drops':1},
                   {'observed_pids':[100]}, {'unobserved_executable_memory':1},
                   {'coverage_start_before_first_exec':False},

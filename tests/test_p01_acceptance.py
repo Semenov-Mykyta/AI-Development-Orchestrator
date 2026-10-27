@@ -10,6 +10,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import tempfile
+import time
 import uuid
 
 import pytest
@@ -19,7 +20,9 @@ from p01_probe import (ProbeError, TestRun, collect_trusted_evidence,
                        verify_sut_proc_identity, verify_immutable_sut_checkout,
                        materialize_synthetic_objects, require_preexisting_synthetic_sentinel,
                        require_sut_synthetic_evidence_access, open_pinned_launch,
-                       verify_execution_closure)
+                       verify_execution_closure, load_kernel_monitor_authority,
+                       arm_monitor_session, verify_monitor_session,
+                       require_pinned_script_access)
 
 ORACLE = Path(__file__).resolve().parent / 'fixtures' / 'p01' / 'P01_ORACLES.json'
 ITEMS = json.loads(ORACLE.read_text('utf8'))['items']
@@ -52,6 +55,7 @@ def approved_test_subprocess():
             raise ProbeError('NOT_CHECKED: runner OS identity not approved')
         # Only a successful REAL denied syscall qualifies as a key isolation proof.
         require_witness_key_isolation(Path(keypath),sut_uid=sut_uid,sut_gid=sut_gid)
+        monitor_key=load_kernel_monitor_authority(policy,sut_uid=sut_uid)
     except (ProbeError, OSError) as exc:
         pytest.fail(str(exc),pytrace=False)
     argv = shlex.split(command)
@@ -90,12 +94,12 @@ def approved_test_subprocess():
     trusted_git_mirror=Path(policy['git_scan_mirror_path'])
     if trusted_git_mirror.resolve().is_relative_to(Path(repo).resolve()):
         pytest.fail('NOT_CHECKED: test Git remote inside SUT checkout',pytrace=False)
-    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid, trusted_git_mirror, Path(policy['synthetic_root_path']), policy['git_test_remote_url'], policy['sut_components_sha256'], policy['sut_launch_mode']
+    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid, trusted_git_mirror, Path(policy['synthetic_root_path']), policy['git_test_remote_url'], policy['sut_components_sha256'], policy['sut_launch_mode'], monitor_key, Path(policy['kernel_monitor_socket_path']), policy['kernel_monitor_id']
 
 
 
 def build_p01_test_run(*, pids, codes, start_ticks, argv, raw, workspace, git_sha,
-                       collector_sha, trusted_git_mirror, trusted_remote_url):
+                       collector_sha, trusted_git_mirror, trusted_remote_url, run_id=None):
     """Pure runner metadata assembly, with independently signed test remote URL.
 
     No data is read from SUT's output and no acceptance result is generated here.
@@ -103,7 +107,7 @@ def build_p01_test_run(*, pids, codes, start_ticks, argv, raw, workspace, git_sh
     return TestRun(pid=pids[-1],returncode=codes[-1],
                    command_digest=hashlib.sha256(_canonical(argv)).hexdigest(),
                    fixture_digest=hashlib.sha256(_canonical(raw)).hexdigest(),
-                   workspace=workspace,git_sha=git_sha,run_id=str(uuid.uuid4()),
+                   workspace=workspace,git_sha=git_sha,run_id=run_id or str(uuid.uuid4()),
                    process_start_ticks=start_ticks,process_pids=tuple(pids),
                    returncodes=tuple(codes),collector_sha256=collector_sha,
                    trusted_remote_repo=trusted_git_mirror,trusted_remote_url=trusted_remote_url)
@@ -111,7 +115,7 @@ def build_p01_test_run(*, pids, codes, start_ticks, argv, raw, workspace, git_sh
 @pytest.mark.parametrize('ac_id,case', TEST_CASES,
                          ids=[f'{ac}:{s["scenario_id"]}' for ac,s in TEST_CASES])
 def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
-    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid, trusted_git_mirror, synthetic_root, trusted_remote_url, approved_components, approved_launch_mode = approved_test_subprocess
+    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid, trusted_git_mirror, synthetic_root, trusted_remote_url, approved_components, approved_launch_mode, monitor_key, monitor_socket, monitor_id = approved_test_subprocess
     with tempfile.TemporaryDirectory(prefix='aio-p01-synthetic-') as scratch:
         scratch_path = Path(scratch)
         workspace = scratch_path / 'workspace'
@@ -142,9 +146,25 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
         # operating on the SAME persisted workspace, not a fictitious count.
         steps = raw.get('sequence') or [raw]
         pids, codes, start_ticks = [], [], 0
+        run_id=str(uuid.uuid4())  # runner-issued BEFORE the first SUT exec
+        command_digest=hashlib.sha256(_canonical(argv)).hexdigest()
+        try:
+            ready=arm_monitor_session(socket_path=monitor_socket,monitor_public_key=monitor_key,
+                                      monitor_id=monitor_id,run_id=run_id,git_sha=git_sha,
+                                      command_digest=command_digest,sut_uid=sut_uid)
+        except ProbeError as exc:
+            pytest.fail(str(exc),pytrace=False)
         # Each Popen executes pinned file descriptors, never pathnames
         # subject to symlink swap or post-check rename.
         with open_pinned_launch(argv,approved_components,launch_mode=approved_launch_mode) as pinned:
+            try:
+                require_pinned_script_access(pinned,sut_uid=sut_uid,sut_gid=sut_gid)
+            except ProbeError as exc:
+                pytest.fail(str(exc),pytrace=False)
+            launch_monotonic_ns=time.monotonic_ns()
+            verify_monitor_session(ready,monitor_key,launch_monotonic_ns=launch_monotonic_ns,
+                                   expected_run_id=run_id,expected_monitor_id=monitor_id,
+                                   expected_git_sha=git_sha,expected_command_digest=command_digest)
             for step in steps:
                 fixture = workspace / f'input-{len(pids)}.json'
                 fixture.write_bytes(_canonical(step))
@@ -172,7 +192,7 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
         run = build_p01_test_run(pids=pids,codes=codes,start_ticks=start_ticks,argv=argv,
                                   raw=raw,workspace=workspace,git_sha=git_sha,
                                   collector_sha=collector_sha,trusted_git_mirror=trusted_git_mirror,
-                                  trusted_remote_url=trusted_remote_url)
+                                  trusted_remote_url=trusted_remote_url,run_id=run_id)
         # NINTH-D5-042: every one of the 63 acceptance scenarios requires an
         # independently authenticated complete execve + load closure witness,
         # regardless of whether the per-AC JSON lists subprocess_audit.
@@ -190,6 +210,9 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
                                       expected_collector_sha256=collector_sha)
             verify_execution_closure(evidence['execve_trace'].captures,
                                      approved_components_sha256=approved_components,
-                                     process_pids=tuple(pids))
+                                     process_pids=tuple(pids), monitor_public_key=monitor_key,
+                                     monitor_ready_receipt=ready, monitor_id=monitor_id,
+                                     run_id=run_id,git_sha=git_sha,command_digest=command_digest,
+                                     launch_monotonic_ns=launch_monotonic_ns)
         except ProbeError as exc:
             pytest.fail(str(exc), pytrace=False)
