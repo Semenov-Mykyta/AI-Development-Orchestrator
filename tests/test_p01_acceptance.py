@@ -70,7 +70,8 @@ def approved_test_subprocess():
         pytest.fail('NOT_CHECKED: Git HEAD does not match approved SUT SHA', pytrace=False)
     try:
         verify_immutable_sut_checkout(Path(repo), git_sha, argv, policy['sut_executable_sha256'],
-                                      approved_components_sha256=policy['sut_components_sha256'])
+                                      approved_components_sha256=policy['sut_components_sha256'],
+                                      approved_launch_mode=policy['sut_launch_mode'])
     except ProbeError as exc:
         pytest.fail(str(exc), pytrace=False)
     # Collector and witness key belong to a different trust domain from SUT.

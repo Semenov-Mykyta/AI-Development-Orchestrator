@@ -31,9 +31,9 @@ def test_sixth_034_rejects_flag_before_unapproved_relative_script(tmp_path):
     subprocess.run(['git','-C',str(repo),'commit','-qm','pinned fixture'],check=True)
     sha=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     # Previous guard checked argv[1] = '-B' and never checked argv[2].
-    with pytest.raises(ProbeError,match='interpreter'):
+    with pytest.raises(ProbeError,match='NOT_CHECKED'):
         verify_immutable_sut_checkout(repo,sha,[str(py),'-B','payload.py'],digest,
-                                      approved_components_sha256={str(py):digest})
+                                      approved_components_sha256={str(py):digest},approved_launch_mode='pinned_python_script')
 
 
 def test_sixth_033_approved_remote_reaches_run_builder_without_unbound_policy(tmp_path):

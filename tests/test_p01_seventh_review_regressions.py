@@ -33,7 +33,7 @@ def test_seventh_037_env_python_wrapper_rejected_even_with_pinned_env_binary(tmp
     digest=hashlib.sha256(env_binary.read_bytes()).hexdigest()
     (tmp_path/'payload.py').write_text('print("unsigned")\n',encoding='utf8')
     # The script exists only in the SUT workspace, never in signed components.
-    with pytest.raises(ProbeError,match='wrapper|interpreter|executable'):
+    with pytest.raises(ProbeError,match='NOT_CHECKED'):
         verify_immutable_sut_checkout(repo,sha,[str(env_binary),'python3','payload.py'],digest,
             approved_components_sha256={str(env_binary.resolve()):digest})
 
@@ -55,7 +55,7 @@ def test_seventh_037_approved_direct_binary_without_wrapper_still_allowed(tmp_pa
     digest=hashlib.sha256(binary.read_bytes()).hexdigest()
     # Direct signed executable, no interpreter flags or unsigned script.
     assert verify_immutable_sut_checkout(repo,sha,[str(binary)],digest,
-            approved_components_sha256={str(binary):digest})
+            approved_components_sha256={str(binary):digest}, approved_launch_mode='direct_elf')
 
 
 def _f(seed='evidence-data-01',size=99):

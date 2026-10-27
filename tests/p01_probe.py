@@ -94,7 +94,7 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
     required={'schema','collector_sha256','collector_path','witness_key_path','git_sha',
               'sut_uid','sut_gid','runner_uid','authorized_by','scope',
               'sut_command_sha256','sut_repo_path','sut_executable_sha256',
-              'sut_components_sha256','git_scan_mirror_path','git_test_remote_url',
+              'sut_launch_mode','sut_components_sha256','git_scan_mirror_path','git_test_remote_url',
               'synthetic_root_path'}
     if not isinstance(data,dict) or not required <= set(data) or data['schema']!='aio.p01.owner_signed_collector_policy.v1':
         raise ProbeError('NOT_CHECKED: incomplete signed collector policy')
@@ -111,6 +111,8 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
         raise ProbeError('NOT_CHECKED: SUT command not pinned in signed policy')
     if not isinstance(data['sut_executable_sha256'],str) or len(data['sut_executable_sha256'])!=64:
         raise ProbeError('NOT_CHECKED: SUT executable bytes are not signed/pinned')
+    if data['sut_launch_mode'] not in ('direct_elf','pinned_python_script'):
+        raise ProbeError('NOT_CHECKED: launch mode must be pinned by signed owner policy')
     if not Path(data['sut_repo_path']).is_absolute():
         raise ProbeError('NOT_CHECKED: SUT checkout not pinned by signed policy')
     components=data['sut_components_sha256']
@@ -457,7 +459,8 @@ def require_preexisting_synthetic_sentinel(synthetic_input: dict, *, trusted_roo
 
 def verify_immutable_sut_checkout(repo: Path, expected_sha: str, argv: list[str],
                                   approved_executable_sha256: str, *,
-                                  approved_components_sha256: dict[str,str] | None = None) -> bool:
+                                  approved_components_sha256: dict[str,str] | None = None,
+                                  approved_launch_mode: str | None = None) -> bool:
     """Fail closed on modified tracked, ignored scripts or unpinned runtime bytes.
 
     A signed manifest must include interpreter/binary, scripts, and declared
@@ -488,26 +491,44 @@ def verify_immutable_sut_checkout(repo: Path, expected_sha: str, argv: list[str]
         raise ProbeError('NOT_CHECKED: SUT executable missing from signed closure')
     if approved_components_sha256[str(executable.resolve())]!=approved_executable_sha256:
         raise ProbeError('NOT_CHECKED: executable digest differs from signed policy')
-    # Known executable wrappers can launch unapproved scripts while their own bytes
-    # remain pinned. A signed 'env' binary is NOT authority for an unsigned child.
-    # If additional wrapper forms are required, they need an approved, explicitly
-    # attested execution chain; this D5 runner rejects them fail-closed.
-    wrappers={'env','sudo','su','runuser','doas','setpriv','nice','nohup','timeout',
-              'stdbuf','setsid','chroot','busybox','xargs','find','taskset','ionice','watch'}
-    if executable.name in wrappers or executable.resolve().name in wrappers:
-        raise ProbeError('NOT_CHECKED: executable wrapper not permitted in signed SUT command')
-    # Only a directly named absolute script is allowed for Python/shell launch.
-    # Flags such as -B, -m, -c and other positional interpreters are rejected:
-    # they can shift the actual script past argv[1] or execute unsigned bytes.
-    if Path(argv[0]).name.startswith(('python','bash','sh')):
-        if (len(argv)<2 or argv[1].startswith('-') or
-                not Path(argv[1]).is_absolute() or
-                not Path(argv[1]).is_file() or
-                str(Path(argv[1]).resolve()) not in approved_components_sha256):
-            raise ProbeError('NOT_CHECKED: interpreter script must be approved absolute component, no flags')
-    for component in [arg for arg in argv[1:] if Path(arg).is_absolute() and Path(arg).is_file()]:
-        if str(Path(component).resolve()) not in approved_components_sha256:
-            raise ProbeError('NOT_CHECKED: invoked script not pinned in signed closure')
+    # SEVENTH-REVIEW-039: NEVER infer authority to execute a second component
+    # from the name/hash of the first one. The OWNER-signed policy binds an
+    # *explicit* launch mode. Unknown launch chains are NOT_CHECKED.
+    # The runtime's independent exec/import closure still needs external proof.
+    if approved_launch_mode == 'direct_elf':
+        # In this narrow mode there is NO pre-approved script/command argument.
+        # The acceptance harness appends only its synthetic input-file pathname.
+        # /usr/bin/dash payload.sh, renamed env python script.py, perl -e, etc.
+        # cannot be mistaken for a standalone program with its own fixture input.
+        if len(argv) != 1 or not executable.is_file():
+            raise ProbeError('NOT_CHECKED: direct_elf permits one pinned ELF, no launch chain')
+        with executable.open('rb') as binary_file:
+            elf_header = binary_file.read(4)
+        if elf_header != b'\x7fELF':
+            raise ProbeError('NOT_CHECKED: direct_elf permits one pinned ELF, no launch chain')
+    elif approved_launch_mode == 'pinned_python_script':
+        # This mode is not a generic interpreter launcher: exactly one pinned,
+        # ABSOLUTE script and no flags, -m/-c, wrapper or extra command bytes.
+        if len(argv) != 2 or not Path(argv[1]).is_absolute() or not Path(argv[1]).is_file():
+            raise ProbeError('NOT_CHECKED: pinned Python launch requires one absolute script')
+        script = Path(argv[1]); script_resolved = str(script.resolve(strict=True))
+        if script.is_symlink() or script_resolved not in approved_components_sha256:
+            raise ProbeError('NOT_CHECKED: Python script not in signed component manifest')
+        # A renamed env/dash/perl executable cannot claim to be a Python
+        # interpreter solely by selecting a signed string launch mode.
+        try:
+            identity=subprocess.run([str(executable), '-I','-S','-c',
+                'import sys; print(sys.implementation.name)'],
+                env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+                capture_output=True,text=True,timeout=5,check=False)
+        except (OSError,subprocess.SubprocessError) as exc:
+            raise ProbeError('NOT_CHECKED: pinned Python interpreter identity unavailable') from exc
+        if identity.returncode != 0 or identity.stdout.strip() != 'cpython':
+            raise ProbeError('NOT_CHECKED: signed Python launch mode is not a Python interpreter')
+    else:
+        raise ProbeError('NOT_CHECKED: no explicitly approved signed SUT launch mode')
+    # Other argv elements cannot be parsed/forwarded by wrapper processes:
+    # all launch-time script bytes above were checked against the signed map.
     for name,sha in approved_components_sha256.items():
         p=Path(name)
         if (not p.is_absolute() or p.is_symlink() or not p.is_file() or

@@ -42,14 +42,14 @@ def test_fifth_029_reject_changed_external_script_and_ignored_import(tmp_path):
     script=tmp_path/'external_script.py';script.write_text('print(1)\n')
     python=Path(sys.executable).resolve();digest=hashlib.sha256(python.read_bytes()).hexdigest()
     components={str(python):digest,str(script):hashlib.sha256(script.read_bytes()).hexdigest()}
-    assert verify_immutable_sut_checkout(repo,sha,[str(python),str(script)],digest,approved_components_sha256=components)
+    assert verify_immutable_sut_checkout(repo,sha,[str(python),str(script)],digest,approved_components_sha256=components,approved_launch_mode='pinned_python_script')
     script.write_text('print(2)\n')
     with pytest.raises(ProbeError):
-        verify_immutable_sut_checkout(repo,sha,[str(python),str(script)],digest,approved_components_sha256=components)
+        verify_immutable_sut_checkout(repo,sha,[str(python),str(script)],digest,approved_components_sha256=components,approved_launch_mode='pinned_python_script')
     script.write_text('print(1)\n')
     (repo/'ignored_dependency.py').write_text('malicious=1\n')
     with pytest.raises(ProbeError):
-        verify_immutable_sut_checkout(repo,sha,[str(python),str(script)],digest,approved_components_sha256=components)
+        verify_immutable_sut_checkout(repo,sha,[str(python),str(script)],digest,approved_components_sha256=components,approved_launch_mode='pinned_python_script')
 
 
 def test_fifth_030_reject_collector_dependency_from_sut_writable_path(tmp_path, monkeypatch):

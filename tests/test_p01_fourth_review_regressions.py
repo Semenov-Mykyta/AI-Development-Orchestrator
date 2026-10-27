@@ -39,17 +39,18 @@ def test_fourth_025_reject_dirty_checkout_even_if_head_stays_same(tmp_path):
     repo=tmp_path/'repo';repo.mkdir(); subprocess.run(['git','init','-q',str(repo)],check=True)
     subprocess.run(['git','-C',str(repo),'config','user.email','synthetic@example.invalid'],check=True)
     subprocess.run(['git','-C',str(repo),'config','user.name','Synthetic'],check=True)
-    executable=repo/'bin.py';executable.write_text('print(1)\n')
+    tracked=repo/'bin.py';tracked.write_text('print(1)\n')
     subprocess.run(['git','-C',str(repo),'add','.'],check=True)
     subprocess.run(['git','-C',str(repo),'commit','-qm','synthetic'],check=True)
     sha=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+    executable=Path('/bin/echo').resolve()
     digest=hashlib.sha256(executable.read_bytes()).hexdigest()
     assert verify_immutable_sut_checkout(repo,sha,[str(executable)],digest,
-        approved_components_sha256={str(executable):digest})
-    executable.write_text('print(2)\n')
+        approved_components_sha256={str(executable):digest}, approved_launch_mode='direct_elf')
+    tracked.write_text('print(2)\n')
     with pytest.raises(ProbeError):
         verify_immutable_sut_checkout(repo,sha,[str(executable)],digest,
-            approved_components_sha256={str(executable):digest})
+            approved_components_sha256={str(executable):digest}, approved_launch_mode='direct_elf')
 
 
 def test_fourth_026_reject_tip_only_scan_with_hidden_parent(tmp_path):
