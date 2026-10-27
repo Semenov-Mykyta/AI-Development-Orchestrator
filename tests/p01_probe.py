@@ -275,56 +275,71 @@ def verify_synthetic_object_bytes(spec: dict, actual: bytes) -> bool:
 
 
 def materialize_synthetic_objects(synthetic_input: dict, workspace: Path) -> list[Path]:
-    """Create actual bounded synthetic files, SHA-check streaming bytes before SUT.
+    """Create exactly reproducible synthetic files or roll back ALL newly created bytes.
 
-    Only files inside isolated workspace; forbidden external namespace sentinels
-    must be provisioned by a separate root-controlled fixture owner and verified.
+    An error during writing, fsync, a post-write digest/size recheck, or a later
+    file never leaves a partially populated fixture namespace reusable as PASS.
     """
     import os
     files=synthetic_input.get('protected_evidence_files',[])
     if not isinstance(files,list):
         raise ProbeError('NOT_CHECKED: invalid evidence file plan')
     created=[]
-    for f in files:
-        if not isinstance(f,dict) or not isinstance(f.get('path'),str):
-            raise ProbeError('NOT_CHECKED: synthetic file path missing')
-        relative=Path(f['path'])
-        if relative.is_absolute() or '..' in relative.parts:
-            raise ProbeError('NOT_CHECKED: unsafe synthetic fixture path')
-        target=workspace/relative
-        if not target.resolve().is_relative_to(workspace.resolve()):
-            raise ProbeError('NOT_CHECKED: synthetic fixture symlink escape')
-        generator=f.get('generator',{})
-        if generator.get('algorithm')!='repeat_utf8_seed_v1' or generator.get('size_bytes')!=f.get('size_bytes'):
-            raise ProbeError('NOT_CHECKED: unknown synthetic byte generator')
-        seed=generator.get('seed_utf8')
-        n=generator['size_bytes']
-        if not isinstance(seed,str) or not seed or type(n)!=int or n<0 or n>536870912:
-            raise ProbeError('NOT_CHECKED: invalid or oversized synthetic fixture')
-        block=seed.encode('utf8')
-        pattern=block*max(1,(1048576//len(block)))
-        target.parent.mkdir(parents=True,exist_ok=True)
-        digest=hashlib.sha256()
-        try:
-            with target.open('xb') as fd:
+    active=None
+    try:
+        for f in files:
+            if not isinstance(f,dict) or not isinstance(f.get('path'),str):
+                raise ProbeError('NOT_CHECKED: synthetic file path missing')
+            relative=Path(f['path'])
+            if relative.is_absolute() or '..' in relative.parts:
+                raise ProbeError('NOT_CHECKED: unsafe synthetic fixture path')
+            target=workspace/relative
+            if not target.resolve().is_relative_to(workspace.resolve()):
+                raise ProbeError('NOT_CHECKED: synthetic fixture symlink escape')
+            generator=f.get('generator',{})
+            if not isinstance(generator,dict) or generator.get('algorithm')!='repeat_utf8_seed_v1' or generator.get('size_bytes')!=f.get('size_bytes'):
+                raise ProbeError('NOT_CHECKED: unknown synthetic byte generator')
+            seed=generator.get('seed_utf8')
+            n=generator['size_bytes']
+            if not isinstance(seed,str) or not seed or type(n)!=int or n<0 or n>536870912:
+                raise ProbeError('NOT_CHECKED: invalid or oversized synthetic fixture')
+            block=seed.encode('utf8')
+            pattern=block*max(1,(1048576//len(block)))
+            target.parent.mkdir(parents=True,exist_ok=True)
+            digest=hashlib.sha256()
+            # O_EXCL | O_NOFOLLOW prevents overwriting old fixtures or symlink targets.
+            fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            active=target
+            with os.fdopen(fd,'wb') as stream:
                 rest=n
                 while rest:
                     chunk=pattern[:min(rest,len(pattern))]
-                    fd.write(chunk);digest.update(chunk);rest-=len(chunk)
-                fd.flush();os.fsync(fd.fileno())
-        except OSError as exc:
-            raise ProbeError('NOT_CHECKED: synthetic fixture not materialized') from exc
-        if digest.hexdigest()!=f.get('sha256'):
-            target.unlink(missing_ok=True)
-            raise ProbeError('NOT_CHECKED: generated synthetic bytes do not match independently declared SHA')
-        # Measure the actual on-disk bytes, not only the generator's write stream.
-        measured=hashlib.sha256()
-        with target.open('rb') as fd:
-            while chunk:=fd.read(1048576): measured.update(chunk)
-        if measured.hexdigest()!=f['sha256'] or target.stat().st_size!=n:
-            raise ProbeError('NOT_CHECKED: actual synthetic file bytes not verified')
-        created.append(target)
-    return created
+                    stream.write(chunk)
+                    digest.update(chunk)
+                    rest-=len(chunk)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if digest.hexdigest()!=f.get('sha256'):
+                raise ProbeError('NOT_CHECKED: generated synthetic bytes do not match independently declared SHA')
+            measured=hashlib.sha256()
+            with target.open('rb') as stream:
+                while chunk:=stream.read(1048576):
+                    measured.update(chunk)
+            if measured.hexdigest()!=f['sha256'] or target.stat().st_size!=n:
+                raise ProbeError('NOT_CHECKED: actual synthetic file bytes not verified')
+            created.append(target)
+            active=None
+        return created
+    except (OSError,ProbeError,ValueError,TypeError) as exc:
+        pending=created+([active] if active is not None else [])
+        try:
+            for path in reversed(pending):
+                path.unlink(missing_ok=True)
+        except OSError as cleanup_exc:
+            raise ProbeError('NOT_CHECKED: synthetic fixture rollback could not be verified') from cleanup_exc
+        if isinstance(exc,ProbeError):
+            raise
+        raise ProbeError('NOT_CHECKED: synthetic fixture materialization incomplete') from exc
 
 
 def require_preexisting_synthetic_sentinel(synthetic_input: dict, *, trusted_root: Path) -> Path:
@@ -390,11 +405,15 @@ def verify_immutable_sut_checkout(repo: Path, expected_sha: str, argv: list[str]
         raise ProbeError('NOT_CHECKED: SUT executable missing from signed closure')
     if approved_components_sha256[str(executable.resolve())]!=approved_executable_sha256:
         raise ProbeError('NOT_CHECKED: executable digest differs from signed policy')
-    # A Python/shell interpreter is not the script: pin argv script inputs too.
-    # Never allow argv to select a relative workspace script after admission.
-    if argv[1:] and Path(argv[0]).name.startswith(('python','bash','sh')):
-        if argv[1] in ('-m','-c') or (not argv[1].startswith('-') and not Path(argv[1]).is_absolute()):
-            raise ProbeError('NOT_CHECKED: interpreter mode/script not pinned as an absolute executable component')
+    # Only a directly named absolute script is allowed for Python/shell launch.
+    # Flags such as -B, -m, -c and other positional interpreters are rejected:
+    # they can shift the actual script past argv[1] or execute unsigned bytes.
+    if Path(argv[0]).name.startswith(('python','bash','sh')):
+        if (len(argv)<2 or argv[1].startswith('-') or
+                not Path(argv[1]).is_absolute() or
+                not Path(argv[1]).is_file() or
+                str(Path(argv[1]).resolve()) not in approved_components_sha256):
+            raise ProbeError('NOT_CHECKED: interpreter script must be approved absolute component, no flags')
     for component in [arg for arg in argv[1:] if Path(arg).is_absolute() and Path(arg).is_file()]:
         if str(Path(component).resolve()) not in approved_components_sha256:
             raise ProbeError('NOT_CHECKED: invoked script not pinned in signed closure')
@@ -624,29 +643,76 @@ def verify_independent_proofs(
     return observed
 
 
+def _execute_collector_isolated(payload: bytes, synthetic_input: dict, run_fields: dict,
+                                required_sources: list[str]) -> dict:
+    """Measure using a NEW isolated Python interpreter, never runner sys.modules.
+
+    -I -S removes PYTHONPATH, user/site packages and cwd from Python import
+    resolution. Only owner-pinned collector bytes and root-controlled stdlib are
+    accessible. A cached dependency in the parent cannot affect measurements.
+    This is D5 test harness plumbing; OS/owner provisioning still NOT_CHECKED.
+    """
+    import base64
+    import os
+    import subprocess
+    import sys
+    import tempfile
+    bootstrap=r'''
+import base64,json,sys,types
+from pathlib import Path
+item=json.loads(sys.stdin.buffer.read())
+scope={'__name__':'aio_signed_collector','__file__':'<approved-collector>'}
+source=base64.b64decode(item['approved_collector_b64'],validate=True)
+exec(compile(source,'<approved-collector>','exec'),scope)
+fn=scope.get('collect')
+if not callable(fn): raise RuntimeError('approved collector lacks collect()')
+run_fields=item['run']
+for key in ('workspace','trusted_remote_repo'):
+    if run_fields.get(key) is not None: run_fields[key]=Path(run_fields[key])
+result=fn(synthetic_input=item['synthetic_input'],run=types.SimpleNamespace(**run_fields),
+          required_sources=frozenset(item['required_sources']))
+if not isinstance(result,dict): raise RuntimeError('unstructured collector result')
+sys.stdout.write(json.dumps(result,sort_keys=True,ensure_ascii=False))
+'''
+    request={'approved_collector_b64':base64.b64encode(payload).decode('ascii'),
+             'synthetic_input':synthetic_input,'run':run_fields,
+             'required_sources':required_sources}
+    with tempfile.TemporaryDirectory(prefix='aio-isolated-collector-') as temp:
+        try:
+            completed=subprocess.run([sys.executable,'-I','-S','-B','-c',bootstrap],
+                 input=_canonical(request),capture_output=True,timeout=30,
+                 cwd=temp,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','PYTHONNOUSERSITE':'1'})
+        except (OSError,subprocess.SubprocessError) as exc:
+            raise ProbeError('NOT_CHECKED: isolated collector process unavailable') from exc
+    if completed.returncode or len(completed.stdout)>1048576 or completed.stderr:
+        raise ProbeError('NOT_CHECKED: isolated collector import/execution failed')
+    try:
+        result=json.loads(completed.stdout)
+    except (UnicodeError,ValueError) as exc:
+        raise ProbeError('NOT_CHECKED: isolated collector output invalid') from exc
+    if not isinstance(result,dict):
+        raise ProbeError('NOT_CHECKED: isolated collector measurements invalid')
+    return result
+
+
 def _load_pinned_collector(collector_file: Path, approved_sha256: str, workspace: Path,
                            sut_uid: int | None = None):
-    """Fail closed unless root-owned collector and ancestry are not SUT-writable.
+    """Return fresh-process collector only after root-controlled-byte admission.
 
-    Imports from a root-controlled private immutable copy; no hash-to-import file race.
-    Real trust provenance still requires independent owner root provisioning.
+    No third-party module cache, ambient user site, cwd or PYTHONPATH is inherited.
+    Missing dependencies fail closed instead of being imported from SUT space.
     """
     import os
     import sys
-    import tempfile
-    import importlib
     if collector_file.is_symlink():
         raise ProbeError('NOT_CHECKED: collector symlink forbidden')
-    path = collector_file.resolve(strict=True)
+    path=collector_file.resolve(strict=True)
     if path.is_relative_to(workspace.resolve()):
         raise ProbeError('NOT_CHECKED: collector in SUT space')
-    for element in (path, *path.parents):
+    for element in (path,*path.parents):
         st=element.stat()
-        if st.st_uid != 0 or st.st_mode & 0o022 or (sut_uid is not None and st.st_uid==sut_uid):
+        if st.st_uid!=0 or st.st_mode & 0o022 or (sut_uid is not None and st.st_uid==sut_uid):
             raise ProbeError('NOT_CHECKED: collector/path not protected from SUT writes')
-    # Reject any import search directory writable by SUT, even if primary
-    # collector was signed. A signed, root-owned stdlib/site-packages closure is
-    # required for real approved runners; no SUT-writable PYTHONPATH imports.
     for name in sys.path:
         if not name:
             raise ProbeError('NOT_CHECKED: cwd on collector import path')
@@ -657,26 +723,17 @@ def _load_pinned_collector(collector_file: Path, approved_sha256: str, workspace
             st=ancestor.stat()
             if st.st_uid!=0 or st.st_mode & 0o022 or (sut_uid is not None and st.st_uid==sut_uid):
                 raise ProbeError('NOT_CHECKED: transitive collector import path is SUT writable')
+    if os.geteuid()!=0:
+        raise ProbeError('NOT_CHECKED: collector isolation requires privileged runner')
     payload=path.read_bytes()
-    if _sha256(payload) != approved_sha256:
+    if _sha256(payload)!=approved_sha256:
         raise ProbeError('NOT_CHECKED: approved collector digest mismatch')
-    # The root-controlled approved directory must be provisioned out of band.
-    # Do not import from the original writable path after checking its hash.
-    with tempfile.TemporaryDirectory(prefix='aio-trusted-collector-') as temp:
-        if os.geteuid()!=0:
-            raise ProbeError('NOT_CHECKED: collector isolation requires privileged runner')
-        copy=Path(temp)/'pinned_collector.py'
-        copy.write_bytes(payload)
-        copy.chmod(0o400)
-        spec=importlib.util.spec_from_file_location('aio_external_approved_test_collector',copy)
-        if spec is None or spec.loader is None:
-            raise ProbeError('NOT_CHECKED: approved collector cannot be imported')
-        module=importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    callback=getattr(module,'collect',None)
-    if not callable(callback):
-        raise ProbeError('NOT_CHECKED: approved collector lacks collect()')
-    return callback
+    def independent_collect(*,synthetic_input,run,required_sources):
+        # Reconstruct a serializable run identity; no witness key or expectations.
+        fields={key:(str(value) if isinstance(value,Path) else list(value) if isinstance(value,tuple) else value)
+                for key,value in vars(run).items()}
+        return _execute_collector_isolated(payload,synthetic_input,fields,list(required_sources))
+    return independent_collect
 
 
 def collect_trusted_evidence(*, synthetic_input: dict[str, Any], required_sources: list[str],

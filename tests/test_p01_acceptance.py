@@ -87,13 +87,28 @@ def approved_test_subprocess():
     trusted_git_mirror=Path(policy['git_scan_mirror_path'])
     if trusted_git_mirror.resolve().is_relative_to(Path(repo).resolve()):
         pytest.fail('NOT_CHECKED: test Git remote inside SUT checkout',pytrace=False)
-    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid, trusted_git_mirror, Path(policy['synthetic_root_path'])
+    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid, trusted_git_mirror, Path(policy['synthetic_root_path']), policy['git_test_remote_url']
 
+
+
+def build_p01_test_run(*, pids, codes, start_ticks, argv, raw, workspace, git_sha,
+                       collector_sha, trusted_git_mirror, trusted_remote_url):
+    """Pure runner metadata assembly, with independently signed test remote URL.
+
+    No data is read from SUT's output and no acceptance result is generated here.
+    """
+    return TestRun(pid=pids[-1],returncode=codes[-1],
+                   command_digest=hashlib.sha256(_canonical(argv)).hexdigest(),
+                   fixture_digest=hashlib.sha256(_canonical(raw)).hexdigest(),
+                   workspace=workspace,git_sha=git_sha,run_id=str(uuid.uuid4()),
+                   process_start_ticks=start_ticks,process_pids=tuple(pids),
+                   returncodes=tuple(codes),collector_sha256=collector_sha,
+                   trusted_remote_repo=trusted_git_mirror,trusted_remote_url=trusted_remote_url)
 
 @pytest.mark.parametrize('ac_id,case', TEST_CASES,
                          ids=[f'{ac}:{s["scenario_id"]}' for ac,s in TEST_CASES])
 def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
-    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid, trusted_git_mirror, synthetic_root = approved_test_subprocess
+    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid, trusted_git_mirror, synthetic_root, trusted_remote_url = approved_test_subprocess
     with tempfile.TemporaryDirectory(prefix='aio-p01-synthetic-') as scratch:
         scratch_path = Path(scratch)
         workspace = scratch_path / 'workspace'
@@ -145,13 +160,10 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
                 pytest.fail('NOT_CHECKED: P01 synthetic subprocess timed out', pytrace=False)
             pids.append(process.pid)
             codes.append(process.returncode)
-        run = TestRun(pid=pids[-1], returncode=codes[-1],
-                      command_digest=hashlib.sha256(_canonical(argv)).hexdigest(),
-                      fixture_digest=hashlib.sha256(_canonical(raw)).hexdigest(),
-                      workspace=workspace, git_sha=git_sha, run_id=str(uuid.uuid4()),
-                      process_start_ticks=start_ticks,
-                      process_pids=tuple(pids), returncodes=tuple(codes),
-                      collector_sha256=collector_sha, trusted_remote_repo=trusted_git_mirror, trusted_remote_url=policy['git_test_remote_url'])
+        run = build_p01_test_run(pids=pids,codes=codes,start_ticks=start_ticks,argv=argv,
+                                  raw=raw,workspace=workspace,git_sha=git_sha,
+                                  collector_sha=collector_sha,trusted_git_mirror=trusted_git_mirror,
+                                  trusted_remote_url=trusted_remote_url)
         sources = [p['source'] for p in case['independent_proofs']]
         try:
             evidence = collect_trusted_evidence(synthetic_input=raw, required_sources=sources,
