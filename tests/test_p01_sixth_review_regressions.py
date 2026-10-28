@@ -52,19 +52,23 @@ def test_sixth_033_approved_remote_reaches_run_builder_without_unbound_policy(tm
 def test_sixth_035_cached_dependency_must_not_influence_collector(tmp_path,monkeypatch):
     # Run a pinned stdlib-only collector in a fresh -I -S interpreter, not current sys.modules.
     from p01_probe import _execute_collector_isolated
+    if os.geteuid()!=0: pytest.skip('test-only collector UID isolation requires root')
     payload=b'import injected_cached_module\ndef collect(**kw): return injected_cached_module.collect(**kw)\n'
     attacker=types.ModuleType('injected_cached_module')
     attacker.collect=lambda **kw: {'filesystem_snapshot':{'allowed':True}}
     monkeypatch.setitem(sys.modules,'injected_cached_module',attacker)
     with pytest.raises(ProbeError,match='NOT_CHECKED'):
-        _execute_collector_isolated(payload, {'operation':'synthetic'}, {'workspace':str(tmp_path)}, ['filesystem_snapshot'])
+        _execute_collector_isolated(payload, {'operation':'synthetic'}, {'workspace':str(tmp_path)}, ['filesystem_snapshot'],collector_uid=65533,collector_gid=65533)
 
 
 def test_sixth_035_clean_interpreter_can_run_approved_stdlib_collector(tmp_path):
     from p01_probe import _execute_collector_isolated
+    if os.geteuid()!=0: pytest.skip('test-only collector UID isolation requires root')
+    for ancestor in (tmp_path.parent.parent,tmp_path.parent,tmp_path):
+        ancestor.chmod(0o711)
     (tmp_path/'measured.txt').write_text('real')
     payload=b'from pathlib import Path\ndef collect(*,synthetic_input,run,required_sources):\n return {"filesystem_snapshot":{"measured":Path(run.workspace,"measured.txt").read_text()}}\n'
-    result=_execute_collector_isolated(payload,{'operation':'synthetic'}, {'workspace':str(tmp_path)}, ['filesystem_snapshot'])
+    result=_execute_collector_isolated(payload,{'operation':'synthetic'}, {'workspace':str(tmp_path)}, ['filesystem_snapshot'],collector_uid=65533,collector_gid=65533)
     assert result=={'filesystem_snapshot':{'measured':'real'}}
 
 

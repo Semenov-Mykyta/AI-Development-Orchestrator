@@ -22,7 +22,7 @@ from p01_probe import (ProbeError, TestRun, collect_trusted_evidence,
                        require_sut_synthetic_evidence_access, open_pinned_launch,
                        verify_execution_closure, load_kernel_monitor_authority,
                        arm_monitor_session, verify_monitor_session,
-                       require_pinned_script_access)
+                       require_pinned_script_access, require_monitor_signer_isolation)
 
 ORACLE = Path(__file__).resolve().parent / 'fixtures' / 'p01' / 'P01_ORACLES.json'
 ITEMS = json.loads(ORACLE.read_text('utf8'))['items']
@@ -56,6 +56,12 @@ def approved_test_subprocess():
         # Only a successful REAL denied syscall qualifies as a key isolation proof.
         require_witness_key_isolation(Path(keypath),sut_uid=sut_uid,sut_gid=sut_gid)
         monitor_key=load_kernel_monitor_authority(policy,sut_uid=sut_uid)
+        collector_uid,collector_gid=policy['collector_uid'],policy['collector_gid']
+        require_monitor_signer_isolation(
+            Path(policy['monitor_key_isolation_probe_path']),
+            Path(policy['kernel_monitor_socket_path']),
+            sut_uid=sut_uid,sut_gid=sut_gid,
+            collector_uid=collector_uid,collector_gid=collector_gid)
     except (ProbeError, OSError) as exc:
         pytest.fail(str(exc),pytrace=False)
     argv = shlex.split(command)
@@ -94,7 +100,7 @@ def approved_test_subprocess():
     trusted_git_mirror=Path(policy['git_scan_mirror_path'])
     if trusted_git_mirror.resolve().is_relative_to(Path(repo).resolve()):
         pytest.fail('NOT_CHECKED: test Git remote inside SUT checkout',pytrace=False)
-    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid, trusted_git_mirror, Path(policy['synthetic_root_path']), policy['git_test_remote_url'], policy['sut_components_sha256'], policy['sut_launch_mode'], monitor_key, Path(policy['kernel_monitor_socket_path']), policy['kernel_monitor_id']
+    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid, trusted_git_mirror, Path(policy['synthetic_root_path']), policy['git_test_remote_url'], policy['sut_components_sha256'], policy['sut_launch_mode'], monitor_key, Path(policy['kernel_monitor_socket_path']), policy['kernel_monitor_id'], collector_uid, collector_gid
 
 
 
@@ -115,7 +121,7 @@ def build_p01_test_run(*, pids, codes, start_ticks, argv, raw, workspace, git_sh
 @pytest.mark.parametrize('ac_id,case', TEST_CASES,
                          ids=[f'{ac}:{s["scenario_id"]}' for ac,s in TEST_CASES])
 def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
-    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid, trusted_git_mirror, synthetic_root, trusted_remote_url, approved_components, approved_launch_mode, monitor_key, monitor_socket, monitor_id = approved_test_subprocess
+    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid, trusted_git_mirror, synthetic_root, trusted_remote_url, approved_components, approved_launch_mode, monitor_key, monitor_socket, monitor_id, collector_uid, collector_gid = approved_test_subprocess
     with tempfile.TemporaryDirectory(prefix='aio-p01-synthetic-') as scratch:
         scratch_path = Path(scratch)
         workspace = scratch_path / 'workspace'
@@ -203,7 +209,8 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
         try:
             evidence = collect_trusted_evidence(synthetic_input=raw, required_sources=sources,
                                                 run=run, collector_file=collector,
-                                                collector_sha256=collector_sha, witness_key=witness_key, sut_uid=sut_uid)
+                                                collector_sha256=collector_sha, witness_key=witness_key, sut_uid=sut_uid,
+                                                 collector_uid=collector_uid,collector_gid=collector_gid)
             verify_independent_proofs(required_case, {}, evidence, run,
                                       trusted_witness_key=witness_key,
                                       expected_git_sha=git_sha, expected_command_digest=run.command_digest,

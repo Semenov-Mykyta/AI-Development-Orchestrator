@@ -37,9 +37,10 @@ def test_third_019_untrusted_self_approved_collector_denied(tmp_path):
     pub.write_bytes(owner.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo))
     trusted=tmp_path/'test_collector.py';trusted.write_text('def collect(**kw): return {}\n')
     policy={'schema':'aio.p01.owner_signed_collector_policy.v1','collector_sha256':hashlib.sha256(trusted.read_bytes()).hexdigest(),'collector_path':str(trusted),
-            'witness_key_path':str(tmp_path/'key'), 'git_sha':'a'*40, 'sut_uid':65534,'sut_gid':65534,'runner_uid':0,'authorized_by':'owner-independent-id', 'scope':'P01-D5','sut_command_sha256':'c'*64,'sut_repo_path':'/synthetic-test-repo','sut_executable_sha256':'d'*64, 'sut_launch_mode':'pinned_python_script', 'sut_components_sha256':{'/synthetic/python':'d'*64},'git_scan_mirror_path':'/synthetic/test-mirror','git_test_remote_url':'file:///synthetic/test-remote','synthetic_root_path':'/synthetic',
+            'witness_key_path':str(tmp_path/'key'), 'git_sha':'a'*40, 'sut_uid':65534,'sut_gid':65534,'runner_uid':0,'collector_uid':65533,'collector_gid':65533,'authorized_by':'owner-independent-id', 'scope':'P01-D5','sut_command_sha256':'c'*64,'sut_repo_path':'/synthetic-test-repo','sut_executable_sha256':'d'*64, 'sut_launch_mode':'pinned_python_script', 'sut_components_sha256':{'/synthetic/python':'d'*64},'git_scan_mirror_path':'/synthetic/test-mirror','git_test_remote_url':'file:///synthetic/test-remote','synthetic_root_path':'/synthetic',
             'kernel_monitor_id':'synthetic-monitor','kernel_monitor_public_key_path':'/synthetic/monitor.pub.pem',
-            'kernel_monitor_public_key_sha256':'e'*64,'kernel_monitor_socket_path':'/synthetic/monitor.sock'}
+            'kernel_monitor_public_key_sha256':'e'*64,'kernel_monitor_socket_path':'/synthetic/monitor.sock',
+            'monitor_key_isolation_probe_path':'/synthetic/monitor-isolation-guard'}
     payload=_canonical(policy)
     with pytest.raises(ProbeError,match='signature|authority'):
         verify_signed_collector_policy(payload,attacker.sign(payload),pub,collector_file=trusted,git_sha='a'*40)

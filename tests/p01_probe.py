@@ -99,11 +99,12 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
     except ValueError as exc:
         raise ProbeError('NOT_CHECKED: malformed signed policy') from exc
     required={'schema','collector_sha256','collector_path','witness_key_path','git_sha',
-              'sut_uid','sut_gid','runner_uid','authorized_by','scope',
+              'sut_uid','sut_gid','runner_uid','collector_uid','collector_gid','authorized_by','scope',
               'sut_command_sha256','sut_repo_path','sut_executable_sha256',
               'sut_launch_mode','sut_components_sha256','git_scan_mirror_path','git_test_remote_url',
               'synthetic_root_path','kernel_monitor_id','kernel_monitor_public_key_path',
-              'kernel_monitor_public_key_sha256','kernel_monitor_socket_path'}
+              'kernel_monitor_public_key_sha256','kernel_monitor_socket_path',
+              'monitor_key_isolation_probe_path'}
     if not isinstance(data,dict) or not required <= set(data) or data['schema']!='aio.p01.owner_signed_collector_policy.v1':
         raise ProbeError('NOT_CHECKED: incomplete signed collector policy')
     if data['scope']!='P01-D5' or not data['authorized_by'] or data['git_sha']!=git_sha:
@@ -112,7 +113,7 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
         raise ProbeError('NOT_CHECKED: signed policy collector path mismatch')
     if data['collector_sha256']!=_sha256(collector_file.read_bytes()):
         raise ProbeError('NOT_CHECKED: signed policy collector digest mismatch')
-    for field in ('sut_uid','sut_gid','runner_uid'):
+    for field in ('sut_uid','sut_gid','runner_uid','collector_uid','collector_gid'):
         if type(data[field]) is not int or data[field]<0:
             raise ProbeError('NOT_CHECKED: signed policy OS identity invalid')
     if not isinstance(data['sut_command_sha256'],str) or len(data['sut_command_sha256'])!=64:
@@ -142,8 +143,14 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
             not all(isinstance(data[k],str) and Path(data[k]).is_absolute() for k in
                     ('kernel_monitor_public_key_path','kernel_monitor_socket_path'))):
         raise ProbeError('NOT_CHECKED: independently pinned kernel monitor authority missing')
-    if data['sut_uid']==data['runner_uid']:
-        raise ProbeError('NOT_CHECKED: signed policy selects same OS identity')
+    if (data['runner_uid'] != 0 or
+            min(data['sut_uid'],data['sut_gid'],data['collector_uid'],data['collector_gid']) == 0 or
+            len({data['sut_uid'],data['collector_uid'],data['runner_uid']}) != 3 or
+            len({data['sut_gid'],data['collector_gid']}) != 2):
+        raise ProbeError('NOT_CHECKED: signed policy does not separate runner, SUT and collector identities')
+    if (not isinstance(data['monitor_key_isolation_probe_path'],str) or
+            not Path(data['monitor_key_isolation_probe_path']).is_absolute()):
+        raise ProbeError('NOT_CHECKED: independent monitor signing-key guard path missing')
     if not Path(data['witness_key_path']).is_absolute():
         raise ProbeError('NOT_CHECKED: untrusted relative witness key path')
     return data
@@ -204,6 +211,75 @@ def require_witness_key_isolation(key_path: Path, *, sut_uid: int, sut_gid: int)
     if child.returncode!=0:
         raise ProbeError('NOT_CHECKED: synthetic witness key OS denial not proven')
     return 'EACCES'
+
+
+
+def require_monitor_signer_isolation(probe_path: Path, monitor_socket: Path, *,
+                                     sut_uid: int, sut_gid: int,
+                                     collector_uid: int, collector_gid: int) -> bool:
+    """Run OS-denial syscalls as BOTH isolated roles before SUT/collector launch.
+
+    An owner-provisioned synthetic signing-key guard must share the monitor
+    signer's OS protection domain. This is not the private key. An owner must
+    inspect real signer isolation at OQ-09/A; a fake JSON flag cannot bypass
+    the negative OS checks or the monitor's independent signature.
+    """
+    if os.geteuid()!=0 or not all(type(x) is int and x>0 for x in
+                                   (sut_uid,sut_gid,collector_uid,collector_gid)):
+        raise ProbeError('NOT_CHECKED: approved root runner and non-root roles required')
+    if sut_uid==collector_uid or sut_gid==collector_gid:
+        raise ProbeError('NOT_CHECKED: collector and SUT share forbidden signing-key identity')
+    for path,kind in ((probe_path,'regular'),(monitor_socket,'socket')):
+        try:
+            if not path.is_absolute() or path.is_symlink():
+                raise ProbeError('NOT_CHECKED: signer isolation target is not an absolute non-symlink')
+            st=path.lstat()
+            if (st.st_uid!=0 or st.st_mode & 0o077 or
+                    not (stat.S_ISREG(st.st_mode) if kind=='regular'
+                         else stat.S_ISSOCK(st.st_mode))):
+                raise ProbeError('NOT_CHECKED: monitor signing guard/socket is not root-only')
+            for parent in (path.parent,*path.parent.parents):
+                pst=parent.lstat()
+                if not stat.S_ISDIR(pst.st_mode) or pst.st_uid!=0 or pst.st_mode & 0o022:
+                    raise ProbeError('NOT_CHECKED: writable monitor signer namespace')
+        except OSError as exc:
+            raise ProbeError('NOT_CHECKED: monitor signer guard/socket not provisioned') from exc
+    snippet=r'''
+import ctypes, errno, os, socket, sys
+from pathlib import Path
+libc=ctypes.CDLL(None,use_errno=True)
+if libc.prctl(38,1,0,0,0)!=0: sys.exit(50)
+status=dict(line.split(':',1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)
+for field in ('Uid','Gid'):
+    ids=status[field].split()
+    if len(ids)!=4 or len(set(ids))!=1: sys.exit(51)
+if status['Groups'].strip() or status['NoNewPrivs'].strip()!='1': sys.exit(52)
+if any(int(status[field],16) for field in ('CapEff','CapPrm','CapAmb')): sys.exit(53)
+try:
+    fd=os.open(sys.argv[1],os.O_RDONLY);os.close(fd);sys.exit(54)
+except OSError as exc:
+    if exc.errno not in (errno.EACCES,errno.EPERM): sys.exit(55)
+sock=socket.socket(socket.AF_UNIX)
+try:
+    sock.connect(sys.argv[2]);sys.exit(56)
+except OSError as exc:
+    if exc.errno not in (errno.EACCES,errno.EPERM): sys.exit(57)
+finally:
+    sock.close()
+sys.stdout.write('MONITOR_DENIED')
+'''
+    for uid,gid in ((collector_uid,collector_gid),(sut_uid,sut_gid)):
+        try:
+            result=subprocess.run([sys.executable,'-I','-S','-B','-c',snippet,
+                                   str(probe_path),str(monitor_socket)],
+                                  user=uid,group=gid,extra_groups=[],umask=0o077,
+                                  capture_output=True,timeout=5,
+                                  env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
+        except (OSError,subprocess.SubprocessError) as exc:
+            raise ProbeError('NOT_CHECKED: monitor isolation syscall probe unavailable') from exc
+        if result.returncode!=0 or result.stdout!=b'MONITOR_DENIED' or result.stderr:
+            raise ProbeError('NOT_CHECKED: collector/SUT can access monitor signing authority')
+    return True
 
 
 def verify_sut_proc_identity(status_text: str, *, sut_uid: int, sut_gid: int, runner_uid: int) -> bool:
@@ -1115,7 +1191,8 @@ def verify_independent_proofs(
 
 
 def _execute_collector_isolated(payload: bytes, synthetic_input: dict, run_fields: dict,
-                                required_sources: list[str]) -> dict:
+                                required_sources: list[str], *, collector_uid: int,
+                                collector_gid: int) -> dict:
     """Measure using a NEW isolated Python interpreter, never runner sys.modules.
 
     -I -S removes PYTHONPATH, user/site packages and cwd from Python import
@@ -1129,9 +1206,19 @@ def _execute_collector_isolated(payload: bytes, synthetic_input: dict, run_field
     import sys
     import tempfile
     bootstrap=r'''
-import base64,json,sys,types
+import base64,ctypes,json,sys,types
 from pathlib import Path
 item=json.loads(sys.stdin.buffer.read())
+libc=ctypes.CDLL(None,use_errno=True)
+if libc.prctl(38,1,0,0,0)!=0: raise RuntimeError('collector NoNewPrivs unavailable')
+status=dict(line.split(':',1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)
+for field,want in (('Uid',item['collector_uid']),('Gid',item['collector_gid'])):
+    ids=[int(value) for value in status[field].split()]
+    if len(ids)!=4 or any(value!=want for value in ids): raise RuntimeError('collector OS role mismatch')
+if status['Groups'].strip() or status['NoNewPrivs'].strip()!='1':
+    raise RuntimeError('collector supplementary group or NoNewPrivs unsafe')
+if any(int(status[field],16) for field in ('CapEff','CapPrm','CapAmb')):
+    raise RuntimeError('collector inherited Linux capabilities')
 scope={'__name__':'aio_signed_collector','__file__':'<approved-collector>'}
 source=base64.b64decode(item['approved_collector_b64'],validate=True)
 exec(compile(source,'<approved-collector>','exec'),scope)
@@ -1147,12 +1234,18 @@ sys.stdout.write(json.dumps(result,sort_keys=True,ensure_ascii=False))
 '''
     request={'approved_collector_b64':base64.b64encode(payload).decode('ascii'),
              'synthetic_input':synthetic_input,'run':run_fields,
-             'required_sources':required_sources}
+             'required_sources':required_sources,'collector_uid':collector_uid,
+             'collector_gid':collector_gid}
+    if (os.geteuid()!=0 or type(collector_uid) is not int or collector_uid<=0 or
+            type(collector_gid) is not int or collector_gid<=0):
+        raise ProbeError('NOT_CHECKED: approved non-root collector identity missing')
     with tempfile.TemporaryDirectory(prefix='aio-isolated-collector-') as temp:
+        os.chmod(temp,0o711)  # role may traverse but cannot list/write
         try:
             completed=subprocess.run([sys.executable,'-I','-S','-B','-c',bootstrap],
                  input=_canonical(request),capture_output=True,timeout=30,
-                 cwd=temp,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','PYTHONNOUSERSITE':'1'})
+                 cwd=temp,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','PYTHONNOUSERSITE':'1'},
+                 user=collector_uid,group=collector_gid,extra_groups=[],umask=0o077)
         except (OSError,subprocess.SubprocessError) as exc:
             raise ProbeError('NOT_CHECKED: isolated collector process unavailable') from exc
     if completed.returncode or len(completed.stdout)>1048576 or completed.stderr:
@@ -1167,7 +1260,8 @@ sys.stdout.write(json.dumps(result,sort_keys=True,ensure_ascii=False))
 
 
 def _load_pinned_collector(collector_file: Path, approved_sha256: str, workspace: Path,
-                           sut_uid: int | None = None):
+                           sut_uid: int | None = None, collector_uid: int | None = None,
+                           collector_gid: int | None = None):
     """Return fresh-process collector only after root-controlled-byte admission.
 
     No third-party module cache, ambient user site, cwd or PYTHONPATH is inherited.
@@ -1194,8 +1288,10 @@ def _load_pinned_collector(collector_file: Path, approved_sha256: str, workspace
             st=ancestor.stat()
             if st.st_uid!=0 or st.st_mode & 0o022 or (sut_uid is not None and st.st_uid==sut_uid):
                 raise ProbeError('NOT_CHECKED: transitive collector import path is SUT writable')
-    if os.geteuid()!=0:
-        raise ProbeError('NOT_CHECKED: collector isolation requires privileged runner')
+    if (os.geteuid()!=0 or type(collector_uid) is not int or collector_uid<=0 or
+            type(collector_gid) is not int or collector_gid<=0 or
+            collector_uid==sut_uid or collector_uid==os.geteuid()):
+        raise ProbeError('NOT_CHECKED: distinct unprivileged collector role not approved')
     payload=path.read_bytes()
     if _sha256(payload)!=approved_sha256:
         raise ProbeError('NOT_CHECKED: approved collector digest mismatch')
@@ -1203,13 +1299,16 @@ def _load_pinned_collector(collector_file: Path, approved_sha256: str, workspace
         # Reconstruct a serializable run identity; no witness key or expectations.
         fields={key:(str(value) if isinstance(value,Path) else list(value) if isinstance(value,tuple) else value)
                 for key,value in vars(run).items()}
-        return _execute_collector_isolated(payload,synthetic_input,fields,list(required_sources))
+        return _execute_collector_isolated(payload,synthetic_input,fields,list(required_sources),
+                                          collector_uid=collector_uid,collector_gid=collector_gid)
     return independent_collect
 
 
 def collect_trusted_evidence(*, synthetic_input: dict[str, Any], required_sources: list[str],
                              run: TestRun, collector_file: Path, collector_sha256: str,
-                             witness_key: bytes, sut_uid: int | None = None) -> dict[str, IndependentProof]:
+                             witness_key: bytes, sut_uid: int | None = None,
+                             collector_uid: int | None = None,
+                             collector_gid: int | None = None) -> dict[str, IndependentProof]:
     """Trusted runner calls independently pinned collector; never sends EXPECTED values.
 
     The plugin is a test-only integration seam. Real OS/CI/Git collectors must
@@ -1220,7 +1319,9 @@ def collect_trusted_evidence(*, synthetic_input: dict[str, Any], required_source
         raise ProbeError('NOT_CHECKED: witness authority absent')
     if run.collector_sha256 != collector_sha256:
         raise ProbeError('NOT_CHECKED: collector pin not bound to run')
-    collect = _load_pinned_collector(collector_file, collector_sha256, run.workspace, sut_uid=sut_uid)
+    collect = _load_pinned_collector(collector_file, collector_sha256, run.workspace,
+                                     sut_uid=sut_uid,collector_uid=collector_uid,
+                                     collector_gid=collector_gid)
     trusted_dir = run.workspace.parent / 'trusted_evidence'
     trusted_dir.mkdir(mode=0o700, exist_ok=False)
     if any(source not in _ALLOWED_WITNESS_SOURCES for source in required_sources):
