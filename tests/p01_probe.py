@@ -153,6 +153,14 @@ def verify_signed_collector_policy(payload: bytes, signature: bytes, pinned_owne
         raise ProbeError('NOT_CHECKED: independent monitor signing-key guard path missing')
     if not Path(data['witness_key_path']).is_absolute():
         raise ProbeError('NOT_CHECKED: untrusted relative witness key path')
+    # Twelfth D5: the owner-signature must also bind exact OQ-09/A signer
+    # deployment and independent READ-ONLY observer. Their deployment is not
+    # a test harness claim; live external attestation is checked before SUT.
+    try:
+        from p01_oqa_attestation import validate_oqa_policy
+        validate_oqa_policy(data)
+    except Exception as exc:
+        raise ProbeError('NOT_CHECKED: independent OQ-09/A signer/observer policy incomplete') from exc
     return data
 
 
@@ -1081,7 +1089,10 @@ def _parse_witness(proof: IndependentProof, run: TestRun) -> dict[str, Any]:
         raise ProbeError('NOT_CHECKED: witness measurements absent')
     if capture != proof.captures:
         raise ProbeError('NOT_CHECKED: captures not extracted from authenticated witness bytes')
-    return capture
+    # Per-source signed observer receipts are envelope metadata, not AC
+    # measurements. Different sources legitimately carry different receipts;
+    # do not merge them into one conflicting observed[] key.
+    return {k:v for k,v in capture.items() if k!='readonly_observer_receipt'}
 
 
 def verify_independent_proofs(

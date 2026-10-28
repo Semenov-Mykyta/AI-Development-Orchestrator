@@ -14,6 +14,8 @@ import time
 import uuid
 
 import pytest
+from p01_oqa_attestation import (OQAttestationError, require_live_oqa_attestation,
+                                 verify_readonly_observer_measurements)
 from p01_probe import (ProbeError, TestRun, collect_trusted_evidence,
                        verify_independent_proofs, verify_normative_expectations, _canonical,
                        load_externally_approved_runner_policy, require_witness_key_isolation,
@@ -100,7 +102,7 @@ def approved_test_subprocess():
     trusted_git_mirror=Path(policy['git_scan_mirror_path'])
     if trusted_git_mirror.resolve().is_relative_to(Path(repo).resolve()):
         pytest.fail('NOT_CHECKED: test Git remote inside SUT checkout',pytrace=False)
-    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid, trusted_git_mirror, Path(policy['synthetic_root_path']), policy['git_test_remote_url'], policy['sut_components_sha256'], policy['sut_launch_mode'], monitor_key, Path(policy['kernel_monitor_socket_path']), policy['kernel_monitor_id'], collector_uid, collector_gid
+    return argv, git_sha, Path(collector), digest, key, sut_uid, sut_gid, trusted_git_mirror, Path(policy['synthetic_root_path']), policy['git_test_remote_url'], policy['sut_components_sha256'], policy['sut_launch_mode'], monitor_key, Path(policy['kernel_monitor_socket_path']), policy['kernel_monitor_id'], collector_uid, collector_gid, policy
 
 
 
@@ -121,7 +123,7 @@ def build_p01_test_run(*, pids, codes, start_ticks, argv, raw, workspace, git_sh
 @pytest.mark.parametrize('ac_id,case', TEST_CASES,
                          ids=[f'{ac}:{s["scenario_id"]}' for ac,s in TEST_CASES])
 def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
-    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid, trusted_git_mirror, synthetic_root, trusted_remote_url, approved_components, approved_launch_mode, monitor_key, monitor_socket, monitor_id, collector_uid, collector_gid = approved_test_subprocess
+    argv, git_sha, collector, collector_sha, witness_key, sut_uid, sut_gid, trusted_git_mirror, synthetic_root, trusted_remote_url, approved_components, approved_launch_mode, monitor_key, monitor_socket, monitor_id, collector_uid, collector_gid, policy = approved_test_subprocess
     with tempfile.TemporaryDirectory(prefix='aio-p01-synthetic-') as scratch:
         scratch_path = Path(scratch)
         workspace = scratch_path / 'workspace'
@@ -154,6 +156,16 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
         pids, codes, start_ticks = [], [], 0
         run_id=str(uuid.uuid4())  # runner-issued BEFORE the first SUT exec
         command_digest=hashlib.sha256(_canonical(argv)).hexdigest()
+        # Owner-approved outside-the-SUT signer/observer deployment is
+        # independently attested by a live, distinct OQ-09/A inspector BEFORE
+        # any SUT subprocess or collector measurement. No inspector = NOT_CHECKED.
+        sources = list(dict.fromkeys([p['source'] for p in case['independent_proofs']] + ['execve_trace']))
+        try:
+            oqa = require_live_oqa_attestation(
+                policy,run_id=run_id,git_sha=git_sha,command_digest=command_digest,
+                required_sources=sources)
+        except (OQAttestationError,OSError) as exc:
+            pytest.fail(str(exc),pytrace=False)
         try:
             ready=arm_monitor_session(socket_path=monitor_socket,monitor_public_key=monitor_key,
                                       monitor_id=monitor_id,run_id=run_id,git_sha=git_sha,
@@ -211,6 +223,13 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
                                                 run=run, collector_file=collector,
                                                 collector_sha256=collector_sha, witness_key=witness_key, sut_uid=sut_uid,
                                                  collector_uid=collector_uid,collector_gid=collector_gid)
+            # A non-root collector may not invent filesystem/SQLite/Git/CI
+            # snapshots: the separately pinned read-only observer signs each
+            # non-kernel capture, bound to its exact source and run.
+            verify_readonly_observer_measurements(
+                evidence,observer_key=oqa['observer_key'],
+                observer_id=oqa['observer_id'],run_id=run_id,git_sha=git_sha,
+                command_digest=command_digest)
             verify_independent_proofs(required_case, {}, evidence, run,
                                       trusted_witness_key=witness_key,
                                       expected_git_sha=git_sha, expected_command_digest=run.command_digest,
@@ -221,5 +240,5 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
                                      monitor_ready_receipt=ready, monitor_id=monitor_id,
                                      run_id=run_id,git_sha=git_sha,command_digest=command_digest,
                                      launch_monotonic_ns=launch_monotonic_ns)
-        except ProbeError as exc:
+        except (ProbeError,OQAttestationError) as exc:
             pytest.fail(str(exc), pytrace=False)

@@ -40,7 +40,19 @@ def test_third_019_untrusted_self_approved_collector_denied(tmp_path):
             'witness_key_path':str(tmp_path/'key'), 'git_sha':'a'*40, 'sut_uid':65534,'sut_gid':65534,'runner_uid':0,'collector_uid':65533,'collector_gid':65533,'authorized_by':'owner-independent-id', 'scope':'P01-D5','sut_command_sha256':'c'*64,'sut_repo_path':'/synthetic-test-repo','sut_executable_sha256':'d'*64, 'sut_launch_mode':'pinned_python_script', 'sut_components_sha256':{'/synthetic/python':'d'*64},'git_scan_mirror_path':'/synthetic/test-mirror','git_test_remote_url':'file:///synthetic/test-remote','synthetic_root_path':'/synthetic',
             'kernel_monitor_id':'synthetic-monitor','kernel_monitor_public_key_path':'/synthetic/monitor.pub.pem',
             'kernel_monitor_public_key_sha256':'e'*64,'kernel_monitor_socket_path':'/synthetic/monitor.sock',
-            'monitor_key_isolation_probe_path':'/synthetic/monitor-isolation-guard'}
+            'monitor_key_isolation_probe_path':'/synthetic/monitor-isolation-guard',
+            'oqa_attester_id':'synthetic-independent-attester',
+            'oqa_attester_public_key_path':'/synthetic/oqa-attester.pub',
+            'oqa_attester_public_key_sha256':'1'*64,
+            'oqa_attester_socket_path':'/synthetic/oqa-attester.sock',
+            'oqa_monitor_deployment_sha256':'2'*64,
+            'oqa_observer_deployment_sha256':'3'*64,
+            'readonly_observer_id':'synthetic-observer',
+            'readonly_observer_public_key_path':'/synthetic/observer.pub',
+            'readonly_observer_public_key_sha256':'4'*64,
+            'readonly_observer_socket_path':'/synthetic/observer.sock',
+            'readonly_observer_protocol':'aio.p01.readonly_snapshot.v1',
+            'readonly_observer_sources':['filesystem_snapshot','sqlite_snapshot']}
     payload=_canonical(policy)
     with pytest.raises(ProbeError,match='signature|authority'):
         verify_signed_collector_policy(payload,attacker.sign(payload),pub,collector_file=trusted,git_sha='a'*40)
