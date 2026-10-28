@@ -120,6 +120,11 @@ def test_045_owner_signed_policy_requires_separate_roles_and_guard():
                 'kernel_monitor_public_key_sha256':'c'*64,
                 'kernel_monitor_socket_path':'/synthetic/monitor.sock',
                 'monitor_key_isolation_probe_path':'/synthetic/key-guard'}
+        # This synthetic signed fixture must satisfy all CURRENT mandatory
+        # OQ-09/A fields. Do not weaken verify_signed_collector_policy().
+        from test_p01_twelfth_review_regressions import policy as current_oqa_policy
+        policy.update({k:v for k,v in current_oqa_policy().items()
+                       if k.startswith(('oqa_', 'readonly_observer_'))})
         raw=_canonical(policy)
         assert verify_signed_collector_policy(
             raw,key.sign(raw),pub,collector_file=collector,git_sha='a'*40)['collector_uid']==65533
@@ -131,6 +136,13 @@ def test_045_owner_signed_policy_requires_separate_roles_and_guard():
             with pytest.raises(ProbeError,match='NOT_CHECKED'):
                 verify_signed_collector_policy(
                     raw,key.sign(raw),pub,collector_file=collector,git_sha='a'*40)
+        # A valid owner signature cannot bypass the required audit authority.
+        incomplete={k:v for k,v in policy.items() if k!='oqa_kernel_audit_id'}
+        incomplete_raw=_canonical(incomplete)
+        with pytest.raises(ProbeError, match='NOT_CHECKED'):
+            verify_signed_collector_policy(
+                incomplete_raw,key.sign(incomplete_raw),pub,
+                collector_file=collector,git_sha='a'*40)
 
 
 def test_045_acceptance_makes_negative_probe_before_popen_and_passes_roles():

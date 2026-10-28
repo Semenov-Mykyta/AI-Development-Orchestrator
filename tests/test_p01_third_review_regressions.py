@@ -53,11 +53,22 @@ def test_third_019_untrusted_self_approved_collector_denied(tmp_path):
             'readonly_observer_socket_path':'/synthetic/observer.sock',
             'readonly_observer_protocol':'aio.p01.readonly_snapshot.v1',
             'readonly_observer_sources':['filesystem_snapshot','sqlite_snapshot']}
+    # Preserve the stricter current owner-signed OQ-09/A deployment contract.
+    # This is a SYNTHETIC policy fixture, never an installed attester.
+    from test_p01_twelfth_review_regressions import policy as current_oqa_policy
+    policy.update({k:v for k,v in current_oqa_policy().items()
+                   if k.startswith(('oqa_', 'readonly_observer_'))})
     payload=_canonical(policy)
     with pytest.raises(ProbeError,match='signature|authority'):
         verify_signed_collector_policy(payload,attacker.sign(payload),pub,collector_file=trusted,git_sha='a'*40)
     approved=verify_signed_collector_policy(payload,owner.sign(payload),pub,collector_file=trusted,git_sha='a'*40)
     assert approved['sut_uid']==65534
+    # Owner signature alone must not bypass mandatory audit sensor fields.
+    incomplete={k:v for k,v in policy.items() if k!='oqa_kernel_audit_public_key_sha256'}
+    incomplete_bytes=_canonical(incomplete)
+    with pytest.raises(ProbeError,match='NOT_CHECKED'):
+        verify_signed_collector_policy(incomplete_bytes,owner.sign(incomplete_bytes),
+                                       pub,collector_file=trusted,git_sha='a'*40)
 
 def test_third_020_same_uid_and_false_key_probe_denied(tmp_path):
     from p01_probe import require_witness_key_isolation
@@ -109,11 +120,29 @@ def test_third_013_os_sentinel_has_independent_existence_and_permission_proof():
     assert o['denial_due_to_os_permissions'] is True
 
 
-def test_third_018_offnode_backup_order_not_just_boolean():
+def test_third_018_offnode_backup_order_not_just_boolean(tmp_path):
+    """Test the actual normative gate after provenance, not a moved source line."""
+    from p01_probe import TestRun, verify_normative_measurements
     c=case('AC-N-15.2','verified-offnode-and-lawful-eviction')
     assert c['synthetic_input']['require_independent_event_order'] is True
-    from p01_probe import verify_independent_proofs
-    assert 'backup_verified_event_seq' in verify_independent_proofs.__code__.co_consts or 'backup_verified_event_seq' in __import__('inspect').getsource(verify_independent_proofs)
+    expected_sha=c['synthetic_input']['protected_evidence_files'][0]['sha256']
+    observed={**c['expected_observations'],
+              'backup_verified_event_seq':12,'eviction_event_seq':13,
+              'offnode_backed_up_sha256':expected_sha,
+              'verified_backup_receipt_id':'synthetic-ack-001'}
+    run=TestRun(pid=1818,returncode=0,command_digest='a'*64,
+                fixture_digest='b'*64,workspace=tmp_path)
+    assert verify_normative_measurements(c,observed,run)==observed
+    wrong=(
+        {'backup_verified_event_seq':14},
+        {'eviction_event_seq':12},
+        {'backup_verified_event_seq':True},
+        {'offnode_backed_up_sha256':'0'*64},
+        {'verified_backup_receipt_id':None},
+    )
+    for change in wrong:
+        with pytest.raises(ProbeError, match='NOT_CHECKED'):
+            verify_normative_measurements(c,{**observed,**change},run)
 
 
 def test_third_021_trace_is_ordered():

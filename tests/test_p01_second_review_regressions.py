@@ -65,10 +65,30 @@ def test_new_d5_015_acceptance_has_explicit_trusted_collector_hook():
 
 
 def test_new_d5_016_proof_must_bind_sha_command_returncode_and_run_id(tmp_path):
-    source=(ROOT/'p01_probe.py').read_text('utf-8')
-    for anchor in ('git_sha', 'run_id', 'run_command_digest', 'run_returncode', 'process_start_ticks'):
-        assert anchor in source
-    assert 'observations = json.loads(proof.path.read_bytes())' in source or 'json.loads(proof.path.read_text' in source
+    """Exercise a real SHA-pinned witness with correctly recomputed HMAC.
+
+    The parser may evolve, but a proof for another run must still be rejected.
+    A plain source-string check is not evidence of this security invariant.
+    """
+    from dataclasses import replace
+    from test_p01_eighteenth_review_regressions import KEY
+    from test_p01_nineteenth_review_regressions import checked_fixture, verify
+
+    case_data, evidence, run = checked_fixture(tmp_path)
+    assert verify(case_data, evidence, run) == {'admitted': True}
+    original = evidence['sqlite_snapshot']
+    mutations = (
+        ('git_sha', 'f'*40),
+        ('run_id', 'unrelated-run'),
+        ('run_command_digest', 'e'*64),
+        ('run_returncode', 1),
+        ('process_start_ticks', run.process_start_ticks + 1),
+    )
+    for field, changed_value in mutations:
+        modified = replace(original, **{field: changed_value, 'witness_mac': ''})
+        modified = replace(modified, witness_mac=_evidence_mac(KEY, modified))
+        with pytest.raises(ProbeError, match='NOT_CHECKED'):
+            verify(case_data, {'sqlite_snapshot': modified}, run)
 
 
 def test_new_d5_017_idempotency_executes_two_real_calls_in_one_workspace():
