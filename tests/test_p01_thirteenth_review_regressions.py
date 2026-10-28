@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from p01_oqa_attestation import (OQAttestationError, _canon, _sha,
     verify_oqa_receipt, verify_readonly_observer_measurements)
-from test_p01_twelfth_review_regressions import signed_case
+from test_p01_twelfth_review_regressions import signed_case, synthetic_response, TEST_KERNEL_AUDIT_SIGNER
 
 
 def _signed_snapshot(signer, *, source, measured, run_id='synthetic-run',
@@ -115,9 +115,10 @@ def test_049_primary_os_probe_artifact_negative_mutations(mutation):
         raw=_canon(data)
         iface['os_probe_artifact']={'os_probe_bytes_b64':base64.b64encode(raw).decode()}
         iface['os_probe_evidence_sha256']=_sha(raw)
-    sig=key.sign(_canon(r)).hex()  # re-sign: probe validation must fail EVEN WITH valid signature
+    # Re-sign attester material; the independent audit signature cannot be forged.
     with pytest.raises(OQAttestationError,match='NOT_CHECKED'):
-        verify_oqa_receipt({'receipt':r,'signature':sig},p,q,attester_key=key.public_key())
+        verify_oqa_receipt(synthetic_response(r,key),p,q,attester_key=key.public_key(),
+                           kernel_audit_key=TEST_KERNEL_AUDIT_SIGNER.public_key())
 
 
 def test_049_readonly_observer_probe_bytes_are_independently_hashed():
@@ -129,5 +130,6 @@ def test_049_readonly_observer_probe_bytes_are_independently_hashed():
         changed=copy.deepcopy(r)
         changed['readonly_observer_deployment'][keyname]=value
         with pytest.raises(OQAttestationError,match='NOT_CHECKED'):
-            verify_oqa_receipt({'receipt':changed,'signature':key.sign(_canon(changed)).hex()},p,q,
-                               attester_key=key.public_key())
+            verify_oqa_receipt(synthetic_response(changed,key),p,q,
+                               attester_key=key.public_key(),
+                               kernel_audit_key=TEST_KERNEL_AUDIT_SIGNER.public_key())

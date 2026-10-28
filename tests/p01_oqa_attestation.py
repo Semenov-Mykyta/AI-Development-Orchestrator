@@ -96,24 +96,29 @@ def validate_oqa_policy(policy: dict) -> bool:
             'oqa_monitor_deployment_sha256','oqa_observer_deployment_sha256',
             'readonly_observer_id','readonly_observer_public_key_path',
             'readonly_observer_public_key_sha256','readonly_observer_socket_path',
-            'readonly_observer_protocol','readonly_observer_sources')
+            'readonly_observer_protocol','readonly_observer_sources',
+            'oqa_kernel_audit_id','oqa_kernel_audit_public_key_path',
+            'oqa_kernel_audit_public_key_sha256','oqa_kernel_audit_deployment_sha256')
     if not isinstance(policy, dict) or any(k not in policy for k in need):
         _deny('owner signed OQ-09/A deployment and observer contract missing')
-    for name in ('oqa_attester_id','readonly_observer_id'):
+    for name in ('oqa_attester_id','readonly_observer_id','oqa_kernel_audit_id'):
         if not isinstance(policy[name],str) or not policy[name]:
             _deny('missing owner-pinned independent service identity')
     for name in ('oqa_attester_public_key_path','oqa_attester_socket_path',
-                 'readonly_observer_public_key_path','readonly_observer_socket_path'):
+                 'readonly_observer_public_key_path','readonly_observer_socket_path',
+                 'oqa_kernel_audit_public_key_path'):
         if not isinstance(policy[name],str) or not Path(policy[name]).is_absolute():
             _deny('unapproved external service path')
     for name in ('oqa_attester_public_key_sha256','oqa_monitor_deployment_sha256',
-                 'oqa_observer_deployment_sha256','readonly_observer_public_key_sha256'):
+                 'oqa_observer_deployment_sha256','readonly_observer_public_key_sha256',
+                 'oqa_kernel_audit_public_key_sha256','oqa_kernel_audit_deployment_sha256'):
         val=policy[name]
         if not isinstance(val,str) or len(val)!=64 or any(c not in '0123456789abcdef' for c in val):
             _deny('invalid signed deployment/public-key digest')
     if len({policy['oqa_attester_public_key_sha256'],
             policy['readonly_observer_public_key_sha256'],
-            policy.get('kernel_monitor_public_key_sha256')})!=3:
+            policy.get('kernel_monitor_public_key_sha256'),
+            policy['oqa_kernel_audit_public_key_sha256']})!=4:
         _deny('independent monitor/observer/attester authorities must use different keys')
     if (policy['readonly_observer_protocol']!='aio.p01.readonly_snapshot.v1' or
             not isinstance(policy['readonly_observer_sources'],list) or
@@ -148,7 +153,8 @@ def _receive_attester(socket_path: Path, request: dict) -> dict:
 
 def _verify_raw_os_probe_artifact(obj: dict, digest: str, *, request: dict,
                                   deployment_sha: str, target: str,
-                                  kind: str, expected_probes: tuple[tuple[str,str,str], ...]):
+                                  kind: str, expected_probes: tuple[tuple[str,str,str], ...],
+                                  issued_monotonic_ns: int):
     """Verify actual signed primary probe BYTES, not a 64-character claim.
 
     The trusted attester embeds the exact syscall witness bytes in its detached
@@ -203,7 +209,7 @@ def _verify_raw_os_probe_artifact(obj: dict, digest: str, *, request: dict,
                 attempt['namespace_id']!=decoded['namespace_id'] or
                 attempt['mac_profile']!=decoded['mac_profile'] or
                 type(attempt['timestamp_monotonic_ns']) is not int or
-                not request['challenge_start_ns']<=attempt['timestamp_monotonic_ns']<=time.monotonic_ns()):
+                not request['challenge_start_ns']<=attempt['timestamp_monotonic_ns']<=issued_monotonic_ns):
             _deny('primary OS probe actor, target, namespace or time unproven')
         triple=(role,op,errno)
         if triple in actual or triple not in expected:
@@ -211,11 +217,27 @@ def _verify_raw_os_probe_artifact(obj: dict, digest: str, *, request: dict,
         actual.add(triple)
     if actual!=expected:
         _deny('missing primary OS negative or positive syscall')
+    if kind=='readonly_observer':
+        state=decoded.get('write_denial_state')
+        if not isinstance(state,dict) or set(state)!={'target_path','before_b64','after_b64'}:
+            _deny('observer write-denial primary bytes absent')
+        target_path=state['target_path']
+        if not isinstance(target_path,str) or not target_path.startswith('/synthetic/') or '..' in Path(target_path).parts:
+            _deny('observer write probe outside test namespace')
+        try:
+            before=base64.b64decode(state['before_b64'],validate=True)
+            after=base64.b64decode(state['after_b64'],validate=True)
+        except (TypeError,ValueError,binascii.Error) as exc:
+            raise OQAttestationError('NOT_CHECKED: noncanonical observer before/after bytes') from exc
+        if not before or len(before)>4096 or not after or len(after)>4096 or before!=after:
+            _deny('observer write-denial primary bytes changed or excessive')
+        return {'before_sha256':_sha(before),'after_sha256':_sha(after)}
     return decoded
 
 
 def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
-                       attester_key: Ed25519PublicKey) -> bool:
+                       attester_key: Ed25519PublicKey,
+                       kernel_audit_key: Ed25519PublicKey | None = None) -> bool:
     """External attester must have inspected actual signer + read-only deployment.
 
     The attester must NOT be the collector, SUT, monitor or observer. Its owner-
@@ -231,7 +253,8 @@ def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
     if not isinstance(receipt,dict): _deny('bad signed OQ receipt')
     for k in ('nonce','run_id','git_sha','command_digest','policy_sha256',
               'attester_id','monitor_id','monitor_public_key_sha256',
-              'collector_uid','collector_gid','sut_uid','sut_gid','required_sources','boot_id'):
+              'collector_uid','collector_gid','sut_uid','sut_gid','required_sources','boot_id',
+              'oqa_kernel_audit_id'):
         if receipt.get(k)!=request.get(k):
             _deny('OQ attestation is not bound to this run, policy or boot')
     if receipt.get('schema')!='aio.p01.oqa.deployment.attested.v1':
@@ -271,7 +294,8 @@ def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
                                      target=iface['target'],kind='monitor_signing_interface',
                                      expected_probes=(
                                          ('collector','signing_request',iface['collector_access_errno']),
-                                         ('sut','signing_request',iface['sut_access_errno'])))
+                                         ('sut','signing_request',iface['sut_access_errno'])),
+                                     issued_monotonic_ns=receipt['issued_monotonic_ns'])
     if (observer.get('deployment_sha256')!=policy['oqa_observer_deployment_sha256'] or
             observer.get('observer_id')!=policy['readonly_observer_id'] or
             observer.get('observer_public_key_sha256')!=policy['readonly_observer_public_key_sha256'] or
@@ -290,7 +314,7 @@ def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
             observer.get('snapshot_scope_readonly_attested') is not True or
             not isinstance(observer.get('os_probe_evidence_sha256'),str)):
         _deny('positive read-only observer access/denial not independently proven')
-    _verify_raw_os_probe_artifact(observer.get('os_probe_artifact'),
+    state_digests=_verify_raw_os_probe_artifact(observer.get('os_probe_artifact'),
                                  observer['os_probe_evidence_sha256'],
                                  request=request,
                                  deployment_sha=observer['deployment_sha256'],
@@ -298,11 +322,69 @@ def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
                                  kind='readonly_observer',expected_probes=(
                                      ('collector','rpc_read','ALLOW'),
                                      ('collector','rpc_write',observer['collector_write_probe']),
-                                     ('sut','rpc_write',observer['sut_write_probe'])))
+                                     ('sut','rpc_write',observer['sut_write_probe'])),
+                                     issued_monotonic_ns=receipt['issued_monotonic_ns'])
+    if (observer['write_probe_bytes_before_sha256']!=state_digests['before_sha256'] or
+            observer['write_probe_bytes_after_sha256']!=state_digests['after_sha256']):
+        _deny('observer read-only evidence not tied to primary write-denial bytes')
     for field in ('write_probe_bytes_before_sha256','write_probe_bytes_after_sha256'):
         digest=observer[field]
         if len(digest)!=64 or any(x not in '0123456789abcdef' for x in digest):
             _deny('observer write-denial file digest invalid')
+    # Attester signature alone cannot claim independent kernel syscall provenance.
+    # An owner-pinned, separately keyed kernel audit sensor must countersign
+    # the EXACT raw probe digest set. An unprovisioned sensor => NOT_CHECKED.
+    audit=response.get('kernel_audit')
+    if not isinstance(audit,dict) or kernel_audit_key is None:
+        _deny('independent kernel audit witness missing')
+    signed=audit.get('receipt')
+    if not isinstance(signed,dict):
+        _deny('kernel audit witness bytes missing')
+    try:
+        kernel_audit_key.verify(bytes.fromhex(audit['signature']),_canon(signed))
+    except Exception as exc:
+        raise OQAttestationError('NOT_CHECKED: independent kernel audit signature invalid') from exc
+    digest_set=sorted([i['os_probe_evidence_sha256'] for i in interfaces]+[
+                      observer['os_probe_evidence_sha256']])
+    # Two independent signed sources must contain the same concrete OS events.
+    # A naked attester claim about all signing APIs is not sufficient.
+    primaries=[('monitor_signing_interface',i['target'],i['os_probe_artifact']) for i in interfaces]
+    primaries.append(('readonly_observer',observer['observer_socket_path'],observer['os_probe_artifact']))
+    expected_events=[]
+    for kind,target,artifact in primaries:
+        try:
+            original=json.loads(base64.b64decode(artifact['os_probe_bytes_b64'],validate=True))
+        except (TypeError,ValueError,KeyError,binascii.Error) as exc:
+            raise OQAttestationError('NOT_CHECKED: no primary events for sensor correlation') from exc
+        for event in original['syscall_attempts']:
+            expected_events.append({'kind':kind,'target':target,'role':event['role'],
+               'uid':event['uid'],'gid':event['gid'],'operation':event['operation'],
+               'errno':event['errno'],'timestamp_monotonic_ns':event['timestamp_monotonic_ns'],
+               'namespace_id':event['namespace_id'],'mac_profile':event['mac_profile']})
+    recorded=signed.get('kernel_syscall_events')
+    endpoints=signed.get('discovered_signing_endpoints')
+    if (not isinstance(recorded,list) or not recorded or
+            not isinstance(endpoints,list) or len(endpoints)!=len(set(endpoints)) or
+            sorted(endpoints)!=sorted(i['target'] for i in interfaces) or
+            sorted(_canon(x) for x in recorded)!=sorted(_canon(x) for x in expected_events)):
+        _deny('independent kernel events or signing interface inventory mismatch')
+    expected_source=('linux_audit_netlink_v1', 'kernel_syscall_events')
+    if (signed.get('schema')!='aio.p01.oqa.kernel_audit.v1' or
+            signed.get('audit_id')!=policy['oqa_kernel_audit_id'] or
+            signed.get('deployment_sha256')!=policy['oqa_kernel_audit_deployment_sha256'] or
+            any(signed.get(f)!=request.get(f) for f in (
+                'nonce','run_id','git_sha','command_digest','policy_sha256','boot_id')) or
+            signed.get('event_digest_set_sha256')!=_sha(_canon(digest_set)) or
+            signed.get('source')!=expected_source[0] or
+            signed.get('origin')!=expected_source[1] or
+            signed.get('event_loss_count')!=0 or
+            signed.get('all_signing_endpoints_observed') is not True or
+            signed.get('independent_of_attester_collector_sut') is not True or
+            type(signed.get('capture_started_ns')) is not int or
+            type(signed.get('capture_stopped_ns')) is not int or
+            not request['challenge_start_ns']<=signed['capture_started_ns']<=
+                signed['capture_stopped_ns']<=receipt['issued_monotonic_ns']):
+        _deny('independent kernel audit does not cover real primary OS probe set')
     return True
 
 
@@ -323,6 +405,8 @@ def require_live_oqa_attestation(policy: dict, *, run_id: str, git_sha: str,
                          policy['oqa_attester_public_key_sha256'])
     observer=_pinned_key(policy['readonly_observer_public_key_path'],
                          policy['readonly_observer_public_key_sha256'])
+    audit_key=_pinned_key(policy['oqa_kernel_audit_public_key_path'],
+                          policy['oqa_kernel_audit_public_key_sha256'])
     _protected_observer_socket(Path(policy['readonly_observer_socket_path']),policy['collector_gid'])
     try:
         boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
@@ -335,9 +419,12 @@ def require_live_oqa_attestation(policy: dict, *, run_id: str, git_sha: str,
              'monitor_public_key_sha256':policy['kernel_monitor_public_key_sha256'],
              'sut_uid':policy['sut_uid'],'sut_gid':policy['sut_gid'],
              'collector_uid':policy['collector_uid'],'collector_gid':policy['collector_gid'],
-             'required_sources':sources,'boot_id':boot,'challenge_start_ns':time.monotonic_ns()}
+             'required_sources':sources,'boot_id':boot,
+             'oqa_kernel_audit_id':policy['oqa_kernel_audit_id'],
+             'challenge_start_ns':time.monotonic_ns()}
     response=_receive_attester(Path(policy['oqa_attester_socket_path']),request)
-    verify_oqa_receipt(response,policy,request,attester_key=attester)
+    verify_oqa_receipt(response,policy,request,attester_key=attester,
+                       kernel_audit_key=audit_key)
     return {'attested_receipt':response['receipt'],'attester_key':attester,
             'observer_key':observer,'observer_id':policy['readonly_observer_id']}
 

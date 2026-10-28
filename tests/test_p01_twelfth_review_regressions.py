@@ -3,6 +3,7 @@ import hashlib
 import base64
 import os
 import socket
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,8 @@ from p01_oqa_attestation import (OQAttestationError, _canon, _sha, _protected_ob
                                 validate_oqa_policy, verify_oqa_receipt,
                                 verify_readonly_observer_measurements)
 
+
+TEST_KERNEL_AUDIT_SIGNER=Ed25519PrivateKey.generate()  # test only, never production
 
 def policy():
     return {'oqa_attester_id':'independent-oqa-inspector',
@@ -27,6 +30,10 @@ def policy():
         'readonly_observer_protocol':'aio.p01.readonly_snapshot.v1',
         'readonly_observer_sources':['filesystem_snapshot','sqlite_snapshot'],
         'kernel_monitor_public_key_sha256':'e'*64,'kernel_monitor_id':'monitor-1',
+        'oqa_kernel_audit_id':'synthetic-independent-kernel-sensor',
+        'oqa_kernel_audit_public_key_path':'/root/trust/audit.pem',
+        'oqa_kernel_audit_public_key_sha256':'f'*64,
+        'oqa_kernel_audit_deployment_sha256':'1'*64,
         'sut_uid':65534,'sut_gid':65534,'collector_uid':65533,'collector_gid':65533}
 
 
@@ -39,7 +46,9 @@ def request(p):
          'sut_uid':p['sut_uid'],'sut_gid':p['sut_gid'],
          'collector_uid':p['collector_uid'],'collector_gid':p['collector_gid'],
          'required_sources':['filesystem_snapshot','sqlite_snapshot'],
-         'boot_id':'synthetic-boot','challenge_start_ns':1}
+         'boot_id':'synthetic-boot',
+         'oqa_kernel_audit_id':p['oqa_kernel_audit_id'],
+         'challenge_start_ns':1}
 
 
 def signed_case():
@@ -48,7 +57,7 @@ def signed_case():
     r={'schema':'aio.p01.oqa.deployment.attested.v1',
        **{k:q[k] for k in ('nonce','run_id','git_sha','command_digest','policy_sha256',
                           'attester_id','monitor_id','monitor_public_key_sha256',
-                          'collector_uid','collector_gid','sut_uid','sut_gid','required_sources','boot_id')},
+                          'collector_uid','collector_gid','sut_uid','sut_gid','required_sources','boot_id','oqa_kernel_audit_id')},
        'issued_monotonic_ns':time.monotonic_ns(),
        'signer_deployment':{'deployment_sha256':p['oqa_monitor_deployment_sha256'],
            'monitor_id':'monitor-1','monitor_public_key_sha256':'e'*64,
@@ -68,7 +77,8 @@ def signed_case():
            'snapshot_source':'trusted_os_broker','sut_can_supply_measurements':False,
            'root_fallback':False,'collector_read_probe':'ALLOW',
            'collector_write_probe':'EACCES','sut_write_probe':'EACCES',
-           'write_probe_bytes_before_sha256':'2'*64,'write_probe_bytes_after_sha256':'2'*64,
+           'write_probe_bytes_before_sha256':_sha(b'synthetic untouched evidence'),
+           'write_probe_bytes_after_sha256':_sha(b'synthetic untouched evidence'),
            'snapshot_scope_readonly_attested':True,'os_probe_evidence_sha256':'3'*64}}
     # Primary attester-observed syscall artifacts (synthetic signed test bytes).
     # They are not an actual OS attester or proof of kernel provenance.
@@ -88,6 +98,10 @@ def signed_case():
                  'timestamp_monotonic_ns':stamp,'namespace_id':'synthetic-mount-ns',
                  'mac_profile':'synthetic-lsm-profile'}
                  for role,op,errno in probes]}
+        if kind=='readonly_observer':
+            doc['write_denial_state']={'target_path':'/synthetic/observer-write-test.bin',
+                 'before_b64':base64.b64encode(b'synthetic untouched evidence').decode(),
+                 'after_b64':base64.b64encode(b'synthetic untouched evidence').decode()}
         raw=_canon(doc)
         return {'os_probe_bytes_b64':base64.b64encode(raw).decode()}, _sha(raw)
     iface=r['signer_deployment']['signing_interfaces'][0]
@@ -99,8 +113,41 @@ def signed_case():
         'readonly_observer',observer['observer_socket_path'],p['oqa_observer_deployment_sha256'],
         [('collector','rpc_read','ALLOW'),('collector','rpc_write','EACCES'),
          ('sut','rpc_write','EACCES')])
+    r['issued_monotonic_ns']=time.monotonic_ns()  # AFTER primary OS event times
+    events=[]
+    for kind,target,artifact in (
+       ('monitor_signing_interface',iface['target'],iface['os_probe_artifact']),
+       ('readonly_observer',observer['observer_socket_path'],observer['os_probe_artifact'])):
+        obj=__import__('json').loads(base64.b64decode(artifact['os_probe_bytes_b64']))
+        for event in obj['syscall_attempts']:
+            events.append({'kind':kind,'target':target,'role':event['role'],
+                 'uid':event['uid'],'gid':event['gid'],'operation':event['operation'],
+                 'errno':event['errno'],'timestamp_monotonic_ns':event['timestamp_monotonic_ns'],
+                 'namespace_id':event['namespace_id'],'mac_profile':event['mac_profile']})
+    audit_record={'schema':'aio.p01.oqa.kernel_audit.v1',
+        'audit_id':p['oqa_kernel_audit_id'],
+        'deployment_sha256':p['oqa_kernel_audit_deployment_sha256'],
+        **{k:q[k] for k in ('nonce','run_id','git_sha','command_digest','policy_sha256','boot_id')},
+        'event_digest_set_sha256':_sha(_canon(sorted([
+            iface['os_probe_evidence_sha256'], observer['os_probe_evidence_sha256']]))),
+        'source':'linux_audit_netlink_v1','origin':'kernel_syscall_events',
+        'event_loss_count':0,'all_signing_endpoints_observed':True,
+        'kernel_syscall_events':events,
+        'discovered_signing_endpoints':[iface['target']],
+        'independent_of_attester_collector_sut':True,
+        'capture_started_ns':q['challenge_start_ns'],
+        'capture_stopped_ns':r['issued_monotonic_ns']}
+    r['__synthetic_kernel_audit_envelope']={
+        'receipt':audit_record,'signature':TEST_KERNEL_AUDIT_SIGNER.sign(_canon(audit_record)).hex()}
     signer=Ed25519PrivateKey.generate()
     return p,q,r,signer
+
+
+def synthetic_response(r, key):
+    """Produce two independent TEST signatures, never runtime evidence."""
+    payload={k:v for k,v in r.items() if k!='__synthetic_kernel_audit_envelope'}
+    return {'receipt':payload,'signature':key.sign(_canon(payload)).hex(),
+            'kernel_audit':r['__synthetic_kernel_audit_envelope']}
 
 
 def test_046_047_signed_policy_must_pin_both_services():
@@ -118,8 +165,9 @@ def test_046_047_signed_policy_must_pin_both_services():
 
 def test_046_actual_signer_deployment_signature_and_all_interfaces_required():
     p,q,r,key=signed_case()
-    valid={'receipt':r,'signature':key.sign(_canon(r)).hex()}
-    assert verify_oqa_receipt(valid,p,q,attester_key=key.public_key())
+    valid=synthetic_response(r,key)
+    assert verify_oqa_receipt(valid,p,q,attester_key=key.public_key(),
+                                  kernel_audit_key=TEST_KERNEL_AUDIT_SIGNER.public_key())
     for path,value in [('signer_deployment.signing_interfaces',[]),
                        ('signer_deployment.unaudited_signing_brokers',1),
                        ('signer_deployment.actual_key_storage_measured',False),
@@ -130,18 +178,21 @@ def test_046_actual_signer_deployment_signature_and_all_interfaces_required():
         import copy
         mutation=copy.deepcopy(r);section,name=path.split('.')
         mutation[section][name]=value
-        signed={'receipt':mutation,'signature':key.sign(_canon(mutation)).hex()}
+        signed=synthetic_response(mutation,key)
         with pytest.raises(OQAttestationError,match='NOT_CHECKED'):
-            verify_oqa_receipt(signed,p,q,attester_key=key.public_key())
+            verify_oqa_receipt(signed,p,q,attester_key=key.public_key(),
+                                  kernel_audit_key=TEST_KERNEL_AUDIT_SIGNER.public_key())
 
 
 def test_046_replay_other_run_or_wrong_attester_key_rejected():
     p,q,r,key=signed_case()
-    signed={'receipt':r,'signature':key.sign(_canon(r)).hex()}
+    signed=synthetic_response(r,key)
     with pytest.raises(OQAttestationError,match='NOT_CHECKED'):
-        verify_oqa_receipt(signed,p,{**q,'nonce':'new-nonce'},attester_key=key.public_key())
+        verify_oqa_receipt(signed,p,{**q,'nonce':'new-nonce'},attester_key=key.public_key(),
+                                  kernel_audit_key=TEST_KERNEL_AUDIT_SIGNER.public_key())
     with pytest.raises(OQAttestationError,match='NOT_CHECKED'):
-        verify_oqa_receipt(signed,p,q,attester_key=Ed25519PrivateKey.generate().public_key())
+        verify_oqa_receipt(signed,p,q,attester_key=Ed25519PrivateKey.generate().public_key(),
+                           kernel_audit_key=TEST_KERNEL_AUDIT_SIGNER.public_key())
 
 
 def test_047_only_attested_readonly_observer_measurements_accepted():

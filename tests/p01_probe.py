@@ -1102,6 +1102,7 @@ def verify_independent_proofs(
     expected_git_sha: str | None = None,
     expected_command_digest: str | None = None,
     expected_collector_sha256: str | None = None,
+    evaluate_expected: bool = True,
 ) -> dict[str, Any]:
     """Verify *external* measurements, ignoring all SUT-reported values.
 
@@ -1156,6 +1157,19 @@ def verify_independent_proofs(
             if key in observed and observed[key] != value:
                 raise ProbeError(f'NOT_CHECKED: inconsistent witness measurement {key}')
             observed[key] = value
+    # The acceptance runner must complete ALL independent process/kernel
+    # provenance gates before applying normative AC comparisons. Existing direct
+    # unit callers preserve the default evaluate_expected=True contract.
+    if evaluate_expected:
+        verify_normative_measurements(case, observed, run)
+    return observed
+
+
+def verify_normative_measurements(case: dict[str,Any], observed: dict[str,Any],
+                                  run: TestRun) -> dict[str,Any]:
+    """Evaluate normative AC ONLY AFTER authenticated execution closure."""
+    if not isinstance(case,dict) or not isinstance(observed,dict) or not isinstance(run,TestRun):
+        raise ProbeError('NOT_CHECKED: invalid normative evaluation context')
     if (case['synthetic_input'].get('operation')=='run_evidence_quota_gate' and
             case['synthetic_input'].get('eviction_allowed')):
         expected_sha=case['synthetic_input']['protected_evidence_files'][0]['sha256']
