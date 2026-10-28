@@ -17,6 +17,7 @@ import sys
 import time
 from contextlib import contextmanager
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -996,7 +997,11 @@ def verify_scan_ref_coverage(advertised: dict[str,str], scanned: dict[str,str],
 
 
 def _canonical(obj: object) -> bytes:
-    return json.dumps(obj, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+    try:
+        return json.dumps(obj, sort_keys=True, separators=(',', ':'),
+                          ensure_ascii=False, allow_nan=False).encode('utf-8')
+    except (ValueError,TypeError) as exc:
+        raise ProbeError('NOT_CHECKED: noncanonical or nonfinite JSON evidence') from exc
 
 
 def _sha256(data: bytes) -> str:
@@ -1077,7 +1082,10 @@ def _evidence_mac(key: bytes, proof: IndependentProof) -> str:
 
 def _parse_witness(proof: IndependentProof, run: TestRun) -> dict[str, Any]:
     try:
-        observations = json.loads(proof.path.read_bytes())
+        observations = json.loads(
+            proof.path.read_bytes(),
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ValueError('non-finite JSON token '+token)))
     except (OSError, ValueError) as exc:
         raise ProbeError('NOT_CHECKED: witness JSON invalid') from exc
     if observations.get('schema') != 'aio.p01.independent_witness.v1':
@@ -1087,7 +1095,7 @@ def _parse_witness(proof: IndependentProof, run: TestRun) -> dict[str, Any]:
     capture = observations.get('measurement')
     if not isinstance(capture, dict) or not capture:
         raise ProbeError('NOT_CHECKED: witness measurements absent')
-    if capture != proof.captures:
+    if not _normative_json_value_equal(capture, proof.captures):
         raise ProbeError('NOT_CHECKED: captures not extracted from authenticated witness bytes')
     # Per-source signed observer receipts are envelope metadata, not AC
     # measurements. Different sources legitimately carry different receipts;
@@ -1154,7 +1162,7 @@ def verify_independent_proofs(
         if not hmac.compare_digest(_evidence_mac(trusted_witness_key, proof), proof.witness_mac):
             raise ProbeError(f'NOT_CHECKED: {source} witness was not captured by trusted runner')
         for key, value in _parse_witness(proof, run).items():
-            if key in observed and observed[key] != value:
+            if key in observed and not _normative_json_value_equal(observed[key], value):
                 raise ProbeError(f'NOT_CHECKED: inconsistent witness measurement {key}')
             observed[key] = value
     # The acceptance runner must complete ALL independent process/kernel
@@ -1173,6 +1181,9 @@ def _normative_json_value_equal(expected: Any, actual: Any) -> bool:
     content follows the same constraint at every nesting depth.
     """
     if type(expected) is not type(actual):
+        return False
+    if type(expected) is float and (not math.isfinite(expected) or
+                                    not math.isfinite(actual)):
         return False
     if isinstance(expected,dict):
         return (expected.keys()==actual.keys() and
@@ -1226,7 +1237,11 @@ def verify_normative_measurements(case: dict[str,Any], observed: dict[str,Any],
         if key not in observed:
             raise ProbeError(f'NOT_CHECKED: no independent observation for {key}')
         if isinstance(expected, dict) and expected.get('op') == 'at_most' and set(expected) == {'op', 'value'}:
-            if type(observed[key]) not in (int, float) or type(expected['value']) not in (int, float) or observed[key] > expected['value'] or observed[key] < 0:
+            if (type(observed[key]) not in (int,float) or
+                    type(expected['value']) not in (int,float) or
+                    (type(observed[key]) is float and not math.isfinite(observed[key])) or
+                    (type(expected['value']) is float and not math.isfinite(expected['value'])) or
+                    observed[key] > expected['value'] or observed[key] < 0):
                 raise ProbeError(f'FAIL: measured quota exceeds limit for {key}')
         elif not _normative_json_value_equal(expected,observed[key]):
             raise ProbeError(f'FAIL: independent measurement differs/type mismatch for {key}')
