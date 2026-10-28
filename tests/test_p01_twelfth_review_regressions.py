@@ -1,5 +1,6 @@
 """TWELFTH-D5-046/047: synthetic external attestation contract tests only."""
 import hashlib
+import base64
 import os
 import socket
 from pathlib import Path
@@ -26,7 +27,7 @@ def policy():
         'readonly_observer_protocol':'aio.p01.readonly_snapshot.v1',
         'readonly_observer_sources':['filesystem_snapshot','sqlite_snapshot'],
         'kernel_monitor_public_key_sha256':'e'*64,'kernel_monitor_id':'monitor-1',
-        'sut_uid':65534,'collector_uid':65533,'collector_gid':65533}
+        'sut_uid':65534,'sut_gid':65534,'collector_uid':65533,'collector_gid':65533}
 
 
 def request(p):
@@ -35,7 +36,8 @@ def request(p):
          'policy_sha256':_sha(_canon(p)),'attester_id':p['oqa_attester_id'],
          'monitor_id':p['kernel_monitor_id'],
          'monitor_public_key_sha256':p['kernel_monitor_public_key_sha256'],
-         'sut_uid':p['sut_uid'],'collector_uid':p['collector_uid'],
+         'sut_uid':p['sut_uid'],'sut_gid':p['sut_gid'],
+         'collector_uid':p['collector_uid'],'collector_gid':p['collector_gid'],
          'required_sources':['filesystem_snapshot','sqlite_snapshot'],
          'boot_id':'synthetic-boot','challenge_start_ns':1}
 
@@ -46,7 +48,7 @@ def signed_case():
     r={'schema':'aio.p01.oqa.deployment.attested.v1',
        **{k:q[k] for k in ('nonce','run_id','git_sha','command_digest','policy_sha256',
                           'attester_id','monitor_id','monitor_public_key_sha256',
-                          'collector_uid','sut_uid','required_sources','boot_id')},
+                          'collector_uid','collector_gid','sut_uid','sut_gid','required_sources','boot_id')},
        'issued_monotonic_ns':time.monotonic_ns(),
        'signer_deployment':{'deployment_sha256':p['oqa_monitor_deployment_sha256'],
            'monitor_id':'monitor-1','monitor_public_key_sha256':'e'*64,
@@ -68,6 +70,35 @@ def signed_case():
            'collector_write_probe':'EACCES','sut_write_probe':'EACCES',
            'write_probe_bytes_before_sha256':'2'*64,'write_probe_bytes_after_sha256':'2'*64,
            'snapshot_scope_readonly_attested':True,'os_probe_evidence_sha256':'3'*64}}
+    # Primary attester-observed syscall artifacts (synthetic signed test bytes).
+    # They are not an actual OS attester or proof of kernel provenance.
+    import time
+    def recorded_artifact(kind,target,deployment,probes):
+        stamp=time.monotonic_ns()
+        doc={'schema':'aio.p01.oqa.os_probe.v1',
+             **{k:q[k] for k in ('nonce','run_id','git_sha','command_digest',
+                                    'policy_sha256','attester_id','boot_id','collector_uid','collector_gid','sut_uid','sut_gid')},
+             'deployment_sha256':deployment,'target':target,'kind':kind,
+             'provenance':'attester_os_syscalls','probe_origin':'independent_attester',
+             'namespace_id':'synthetic-mount-ns','mac_profile':'synthetic-lsm-profile',
+             'syscall_attempts':[{'role':role,
+                 'uid':p['collector_uid'] if role=='collector' else p['sut_uid'],
+                 'gid':p['collector_gid'] if role=='collector' else 65534,
+                 'target':target,'operation':op,'errno':errno,
+                 'timestamp_monotonic_ns':stamp,'namespace_id':'synthetic-mount-ns',
+                 'mac_profile':'synthetic-lsm-profile'}
+                 for role,op,errno in probes]}
+        raw=_canon(doc)
+        return {'os_probe_bytes_b64':base64.b64encode(raw).decode()}, _sha(raw)
+    iface=r['signer_deployment']['signing_interfaces'][0]
+    iface['os_probe_artifact'],iface['os_probe_evidence_sha256']=recorded_artifact(
+        'monitor_signing_interface',iface['target'],p['oqa_monitor_deployment_sha256'],
+        [('collector','signing_request','EACCES'),('sut','signing_request','EACCES')])
+    observer=r['readonly_observer_deployment']
+    observer['os_probe_artifact'],observer['os_probe_evidence_sha256']=recorded_artifact(
+        'readonly_observer',observer['observer_socket_path'],p['oqa_observer_deployment_sha256'],
+        [('collector','rpc_read','ALLOW'),('collector','rpc_write','EACCES'),
+         ('sut','rpc_write','EACCES')])
     signer=Ed25519PrivateKey.generate()
     return p,q,r,signer
 

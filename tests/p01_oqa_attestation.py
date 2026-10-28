@@ -7,6 +7,8 @@ these claims. No inspector / no observer / missing receipt => NOT_CHECKED.
 """
 from __future__ import annotations
 import hashlib
+import base64
+import binascii
 import json
 import os
 import secrets
@@ -144,6 +146,74 @@ def _receive_attester(socket_path: Path, request: dict) -> dict:
     return parsed
 
 
+def _verify_raw_os_probe_artifact(obj: dict, digest: str, *, request: dict,
+                                  deployment_sha: str, target: str,
+                                  kind: str, expected_probes: tuple[tuple[str,str,str], ...]):
+    """Verify actual signed primary probe BYTES, not a 64-character claim.
+
+    The trusted attester embeds the exact syscall witness bytes in its detached
+    Ed25519-signed receipt. An external OQ-09/A audit must independently check
+    their OS origin; signature+hash alone does not prove the syscalls ran.
+    """
+    if not isinstance(obj,dict) or set(obj)!= {'os_probe_bytes_b64'}:
+        _deny('primary OS probe artifact missing')
+    if (not isinstance(digest,str) or len(digest)!=64 or
+            any(ch not in '0123456789abcdef' for ch in digest)):
+        _deny('primary OS probe digest not hexadecimal SHA-256')
+    try:
+        data=base64.b64decode(obj['os_probe_bytes_b64'],validate=True)
+        if len(data)>32768 or _sha(data)!=digest:
+            _deny('primary OS probe bytes mismatch signed digest')
+        decoded=json.loads(data)
+    except (ValueError,TypeError,KeyError,UnicodeDecodeError,binascii.Error) as exc:
+        raise OQAttestationError('NOT_CHECKED: primary OS probe witness malformed') from exc
+    if not isinstance(decoded,dict) or data!=_canon(decoded):
+        _deny('primary OS probe witness not canonical bytes')
+    required=('nonce','run_id','git_sha','command_digest','policy_sha256',
+              'attester_id','boot_id','collector_uid','collector_gid','sut_uid','sut_gid')
+    if (decoded.get('schema')!='aio.p01.oqa.os_probe.v1' or
+            any(decoded.get(k)!=request.get(k) for k in required) or
+            decoded.get('deployment_sha256')!=deployment_sha or
+            decoded.get('target')!=target or decoded.get('kind')!=kind or
+            decoded.get('provenance')!='attester_os_syscalls' or
+            decoded.get('probe_origin')!='independent_attester' or
+            not isinstance(decoded.get('namespace_id'),str) or
+            not decoded['namespace_id'] or
+            not isinstance(decoded.get('mac_profile'),str) or
+            not decoded['mac_profile']):
+        _deny('primary OS probe witness origin/deployment mismatch')
+    attempts=decoded.get('syscall_attempts')
+    if not isinstance(attempts,list) or len(attempts)!=len(expected_probes):
+        _deny('incomplete primary OS syscall witness')
+    expected={(role,operation,errno) for role,operation,errno in expected_probes}
+    actual=set()
+    for attempt in attempts:
+        if not isinstance(attempt,dict) or set(attempt)!= {
+                'role','uid','gid','operation','errno','target','timestamp_monotonic_ns',
+                'namespace_id','mac_profile'}:
+            _deny('missing primary OS syscall identity/provenance')
+        role,op,errno=attempt['role'],attempt['operation'],attempt['errno']
+        if role not in ('collector','sut'):
+            _deny('unknown OS probe actor')
+        uid=request['collector_uid'] if role=='collector' else request['sut_uid']
+        gid=request['collector_gid'] if role=='collector' else request['sut_gid']
+        if (type(attempt['uid']) is not int or attempt['uid']!=uid or
+                type(attempt['gid']) is not int or attempt['gid']!=gid or
+                attempt['target']!=target or
+                attempt['namespace_id']!=decoded['namespace_id'] or
+                attempt['mac_profile']!=decoded['mac_profile'] or
+                type(attempt['timestamp_monotonic_ns']) is not int or
+                not request['challenge_start_ns']<=attempt['timestamp_monotonic_ns']<=time.monotonic_ns()):
+            _deny('primary OS probe actor, target, namespace or time unproven')
+        triple=(role,op,errno)
+        if triple in actual or triple not in expected:
+            _deny('unexpected/repeated OS syscall or errno')
+        actual.add(triple)
+    if actual!=expected:
+        _deny('missing primary OS negative or positive syscall')
+    return decoded
+
+
 def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
                        attester_key: Ed25519PublicKey) -> bool:
     """External attester must have inspected actual signer + read-only deployment.
@@ -161,7 +231,7 @@ def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
     if not isinstance(receipt,dict): _deny('bad signed OQ receipt')
     for k in ('nonce','run_id','git_sha','command_digest','policy_sha256',
               'attester_id','monitor_id','monitor_public_key_sha256',
-              'collector_uid','sut_uid','required_sources','boot_id'):
+              'collector_uid','collector_gid','sut_uid','sut_gid','required_sources','boot_id'):
         if receipt.get(k)!=request.get(k):
             _deny('OQ attestation is not bound to this run, policy or boot')
     if receipt.get('schema')!='aio.p01.oqa.deployment.attested.v1':
@@ -186,14 +256,22 @@ def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
     interfaces=signer.get('signing_interfaces')
     if not isinstance(interfaces,list) or not interfaces:
         _deny('monitor signing interfaces not independently enumerated')
+    if len({i.get('target') for i in interfaces if isinstance(i,dict)})!=len(interfaces):
+        _deny('duplicate signing endpoint masks untested interface')
     for iface in interfaces:
         if (not isinstance(iface,dict) or not isinstance(iface.get('target'),str) or
                 not iface['target'] or iface.get('collector_access_errno') not in ('EACCES','EPERM') or
                 iface.get('sut_access_errno') not in ('EACCES','EPERM') or
-                iface.get('signer_key_id')!=signer['signer_key_id'] or
-                not isinstance(iface.get('os_probe_evidence_sha256'),str) or
-                len(iface['os_probe_evidence_sha256'])!=64):
+                iface.get('signer_key_id')!=signer['signer_key_id']):
             _deny('unproven alternative signing interface or unsafe broker')
+        _verify_raw_os_probe_artifact(iface.get('os_probe_artifact'),
+                                     iface.get('os_probe_evidence_sha256'),
+                                     request=request,
+                                     deployment_sha=signer['deployment_sha256'],
+                                     target=iface['target'],kind='monitor_signing_interface',
+                                     expected_probes=(
+                                         ('collector','signing_request',iface['collector_access_errno']),
+                                         ('sut','signing_request',iface['sut_access_errno'])))
     if (observer.get('deployment_sha256')!=policy['oqa_observer_deployment_sha256'] or
             observer.get('observer_id')!=policy['readonly_observer_id'] or
             observer.get('observer_public_key_sha256')!=policy['readonly_observer_public_key_sha256'] or
@@ -210,9 +288,21 @@ def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
             not isinstance(observer.get('write_probe_bytes_before_sha256'),str) or
             len(observer['write_probe_bytes_before_sha256'])!=64 or
             observer.get('snapshot_scope_readonly_attested') is not True or
-            not isinstance(observer.get('os_probe_evidence_sha256'),str) or
-            len(observer['os_probe_evidence_sha256'])!=64):
+            not isinstance(observer.get('os_probe_evidence_sha256'),str)):
         _deny('positive read-only observer access/denial not independently proven')
+    _verify_raw_os_probe_artifact(observer.get('os_probe_artifact'),
+                                 observer['os_probe_evidence_sha256'],
+                                 request=request,
+                                 deployment_sha=observer['deployment_sha256'],
+                                 target=observer['observer_socket_path'],
+                                 kind='readonly_observer',expected_probes=(
+                                     ('collector','rpc_read','ALLOW'),
+                                     ('collector','rpc_write',observer['collector_write_probe']),
+                                     ('sut','rpc_write',observer['sut_write_probe'])))
+    for field in ('write_probe_bytes_before_sha256','write_probe_bytes_after_sha256'):
+        digest=observer[field]
+        if len(digest)!=64 or any(x not in '0123456789abcdef' for x in digest):
+            _deny('observer write-denial file digest invalid')
     return True
 
 
@@ -243,7 +333,8 @@ def require_live_oqa_attestation(policy: dict, *, run_id: str, git_sha: str,
              'command_digest':command_digest, 'policy_sha256':_sha(_canon(policy)),
              'attester_id':policy['oqa_attester_id'],'monitor_id':policy['kernel_monitor_id'],
              'monitor_public_key_sha256':policy['kernel_monitor_public_key_sha256'],
-             'sut_uid':policy['sut_uid'],'collector_uid':policy['collector_uid'],
+             'sut_uid':policy['sut_uid'],'sut_gid':policy['sut_gid'],
+             'collector_uid':policy['collector_uid'],'collector_gid':policy['collector_gid'],
              'required_sources':sources,'boot_id':boot,'challenge_start_ns':time.monotonic_ns()}
     response=_receive_attester(Path(policy['oqa_attester_socket_path']),request)
     verify_oqa_receipt(response,policy,request,attester_key=attester)
