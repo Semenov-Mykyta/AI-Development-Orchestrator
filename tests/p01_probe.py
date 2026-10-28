@@ -1080,6 +1080,34 @@ def _evidence_mac(key: bytes, proof: IndependentProof) -> str:
     return hmac.new(key, _canonical(signed), hashlib.sha256).hexdigest()
 
 
+def _require_typed_witness_identity(run: TestRun, proof: IndependentProof | None = None) -> None:
+    """Admit only real integer process identities, never bool/float lookalikes.
+
+    Python numeric equality (True==1 and False==0) is not a valid binding
+    between signed capture, run metadata and an independent witness.
+    """
+    if (type(run.pid) is not int or run.pid <= 0 or
+            type(run.returncode) is not int or
+            type(run.process_start_ticks) is not int or run.process_start_ticks <= 0 or
+            type(run.process_pids) is not tuple or not run.process_pids or
+            type(run.returncodes) is not tuple or not run.returncodes or
+            any(type(pid) is not int or pid <= 0 for pid in run.process_pids) or
+            any(type(code) is not int for code in run.returncodes) or
+            any(type(getattr(run, field)) is not str or not getattr(run, field)
+                for field in ('run_id','git_sha','command_digest',
+                              'fixture_digest','collector_sha256'))):
+        raise ProbeError('NOT_CHECKED: incorrectly typed runner execution identity')
+    if proof is not None and (
+            type(proof.run_pid) is not int or proof.run_pid <= 0 or
+            type(proof.run_returncode) is not int or
+            type(proof.process_start_ticks) is not int or proof.process_start_ticks <= 0 or
+            type(proof.source) is not str or not proof.source or
+            any(type(getattr(proof, field)) is not str or not getattr(proof, field)
+                for field in ('run_id','git_sha','run_command_digest',
+                              'fixture_digest','sha256','witness_mac'))):
+        raise ProbeError('NOT_CHECKED: incorrectly typed independent witness identity')
+
+
 def _parse_witness(proof: IndependentProof, run: TestRun) -> dict[str, Any]:
     try:
         observations = json.loads(
@@ -1088,9 +1116,12 @@ def _parse_witness(proof: IndependentProof, run: TestRun) -> dict[str, Any]:
                 ValueError('non-finite JSON token '+token)))
     except (OSError, ValueError) as exc:
         raise ProbeError('NOT_CHECKED: witness JSON invalid') from exc
+    if type(observations) is not dict:
+        raise ProbeError('NOT_CHECKED: witness root must be a JSON object')
+    _require_typed_witness_identity(run, proof)
     if observations.get('schema') != 'aio.p01.independent_witness.v1':
         raise ProbeError('NOT_CHECKED: missing witness schema')
-    if observations.get('source') != proof.source or observations.get('run') != _run_identity(run):
+    if observations.get('source') != proof.source or not _normative_json_value_equal(observations.get('run'), _run_identity(run)):
         raise ProbeError('NOT_CHECKED: witness run metadata mismatch')
     capture = observations.get('measurement')
     if not isinstance(capture, dict) or not capture:
@@ -1118,8 +1149,9 @@ def verify_independent_proofs(
     must pin its bytes and not expose key/collector/evidence to the SUT. Its
     unit-test MAC fixtures are not proof of a real execution.
     """
-    if run is None or not isinstance(run, TestRun) or run.pid <= 0:
+    if run is None or not isinstance(run, TestRun):
         raise ProbeError('NOT_CHECKED: actual subprocess PID missing')
+    _require_typed_witness_identity(run)
     if not trusted_witness_key or len(trusted_witness_key) < 32:
         raise ProbeError('NOT_CHECKED: independent runner witness authority absent')
     if not expected_git_sha or run.git_sha != expected_git_sha or len(run.git_sha) != 40:
@@ -1150,6 +1182,7 @@ def verify_independent_proofs(
         proof = evidence.get(source)
         if not isinstance(proof, IndependentProof) or proof.source != source:
             raise ProbeError(f'NOT_CHECKED: independent {source} witness missing')
+        _require_typed_witness_identity(run, proof)
         if proof.run_pid != run.pid or proof.fixture_digest != digest or proof.run_id != run.run_id:
             raise ProbeError(f'NOT_CHECKED: witness for wrong execution: {source}')
         if (proof.git_sha != run.git_sha or proof.run_command_digest != run.command_digest
