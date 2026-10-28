@@ -1165,6 +1165,24 @@ def verify_independent_proofs(
     return observed
 
 
+def _normative_json_value_equal(expected: Any, actual: Any) -> bool:
+    """Compare actual and expected JSON values with exact types, recursively.
+
+    In Python bool subclasses int, hence `False == 0` and `True == 1` must
+    never satisfy an authenticated normative AC measurement. Dict/list
+    content follows the same constraint at every nesting depth.
+    """
+    if type(expected) is not type(actual):
+        return False
+    if isinstance(expected,dict):
+        return (expected.keys()==actual.keys() and
+                all(_normative_json_value_equal(v,actual[k]) for k,v in expected.items()))
+    if isinstance(expected,list):
+        return (len(expected)==len(actual) and
+                all(_normative_json_value_equal(a,b) for a,b in zip(expected,actual)))
+    return expected==actual
+
+
 def verify_normative_measurements(case: dict[str,Any], observed: dict[str,Any],
                                   run: TestRun) -> dict[str,Any]:
     """Evaluate normative AC ONLY AFTER authenticated execution closure."""
@@ -1210,8 +1228,8 @@ def verify_normative_measurements(case: dict[str,Any], observed: dict[str,Any],
         if isinstance(expected, dict) and expected.get('op') == 'at_most' and set(expected) == {'op', 'value'}:
             if type(observed[key]) not in (int, float) or type(expected['value']) not in (int, float) or observed[key] > expected['value'] or observed[key] < 0:
                 raise ProbeError(f'FAIL: measured quota exceeds limit for {key}')
-        elif observed[key] != expected:
-            raise ProbeError(f'FAIL: independent measurement differs for {key}')
+        elif not _normative_json_value_equal(expected,observed[key]):
+            raise ProbeError(f'FAIL: independent measurement differs/type mismatch for {key}')
     return observed
 
 

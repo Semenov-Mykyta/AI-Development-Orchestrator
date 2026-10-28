@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from cryptography.hazmat.primitives.serialization import load_pem_public_key
+from cryptography.hazmat.primitives.serialization import load_pem_public_key, Encoding, PublicFormat
 
 
 class OQAttestationError(AssertionError):
@@ -87,6 +87,21 @@ def _pinned_key(path: str, digest: str) -> Ed25519PublicKey:
     if _sha(buf) != digest or not isinstance(key, Ed25519PublicKey):
         _deny('external inspector key fingerprint/type mismatch')
     return key
+
+
+def require_distinct_oqa_signing_keys(*keys: Ed25519PublicKey) -> bool:
+    """Cryptographic key identity, not PEM-file hashes or serialization layout.
+
+    Independent signing domains additionally require OQ-09/A OS attestation.
+    This check detects a single Ed25519 private key represented by distinct
+    valid PEM serializations with four distinct file SHA-256 digests.
+    """
+    if len(keys)!=4 or any(not isinstance(k,Ed25519PublicKey) for k in keys):
+        _deny('missing cryptographic signing key identity')
+    fingerprints=[key.public_bytes(Encoding.Raw,PublicFormat.Raw) for key in keys]
+    if len(set(fingerprints))!=4:
+        _deny('monitor/observer/attester/audit signing key identities not distinct')
+    return True
 
 
 def validate_oqa_policy(policy: dict) -> bool:
@@ -424,7 +439,15 @@ def require_live_oqa_attestation(policy: dict, *, run_id: str, git_sha: str,
     observer=_pinned_key(policy['readonly_observer_public_key_path'],
                          policy['readonly_observer_public_key_sha256'])
     audit_key=_pinned_key(policy['oqa_kernel_audit_public_key_path'],
-                          policy['oqa_kernel_audit_public_key_sha256'])
+                           policy['oqa_kernel_audit_public_key_sha256'])
+    # Compare canonical Ed25519 key bytes AFTER root-controlled SHA-pinned PEM
+    # loading: different PEM encodings may contain the exact SAME key.
+    monitor_path=policy.get('kernel_monitor_public_key_path')
+    monitor_digest=policy.get('kernel_monitor_public_key_sha256')
+    if not isinstance(monitor_path,str) or not isinstance(monitor_digest,str):
+        _deny('owner-pinned kernel monitor signing public key missing')
+    monitor=_pinned_key(monitor_path,monitor_digest)
+    require_distinct_oqa_signing_keys(attester,observer,monitor,audit_key)
     _protected_observer_socket(Path(policy['readonly_observer_socket_path']),policy['collector_gid'])
     try:
         boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
