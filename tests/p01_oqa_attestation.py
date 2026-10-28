@@ -273,13 +273,18 @@ def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
             signer.get('actual_key_storage_measured') is not True or
             signer.get('namespace_and_mac_policy_measured') is not True or
             signer.get('all_signing_interfaces_enumerated') is not True or
-            signer.get('unaudited_signing_brokers')!=0 or
+            type(signer.get('unaudited_signing_brokers')) is not int or
+            signer['unaudited_signing_brokers']!=0 or
             signer.get('fabricated_event_signing_rejected') is not True):
         _deny('actual monitor signer deployment or signing API not attested')
     interfaces=signer.get('signing_interfaces')
     if not isinstance(interfaces,list) or not interfaces:
         _deny('monitor signing interfaces not independently enumerated')
-    if len({i.get('target') for i in interfaces if isinstance(i,dict)})!=len(interfaces):
+    # Strictly validate endpoint types BEFORE set/hash/sort operations.
+    if any(not isinstance(i,dict) or type(i.get('target')) is not str or
+           not i['target'] for i in interfaces):
+        _deny('monitor signing interface endpoint malformed')
+    if len({i['target'] for i in interfaces})!=len(interfaces):
         _deny('duplicate signing endpoint masks untested interface')
     for iface in interfaces:
         if (not isinstance(iface,dict) or not isinstance(iface.get('target'),str) or
@@ -363,8 +368,11 @@ def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
                'namespace_id':event['namespace_id'],'mac_profile':event['mac_profile']})
     recorded=signed.get('kernel_syscall_events')
     endpoints=signed.get('discovered_signing_endpoints')
+    if (not isinstance(endpoints,list) or
+            any(type(endpoint) is not str or not endpoint for endpoint in endpoints)):
+        _deny('independent kernel signing endpoint inventory malformed')
     if (not isinstance(recorded,list) or not recorded or
-            not isinstance(endpoints,list) or len(endpoints)!=len(set(endpoints)) or
+            len(endpoints)!=len(set(endpoints)) or
             sorted(endpoints)!=sorted(i['target'] for i in interfaces) or
             sorted(_canon(x) for x in recorded)!=sorted(_canon(x) for x in expected_events)):
         _deny('independent kernel events or signing interface inventory mismatch')
