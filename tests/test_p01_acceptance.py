@@ -17,7 +17,8 @@ import pytest
 from p01_oqa_attestation import (OQAttestationError, require_live_oqa_attestation,
                                  verify_readonly_observer_measurements)
 from p01_probe import (ProbeError, TestRun, collect_trusted_evidence,
-                       verify_independent_proofs, verify_normative_expectations,\n                       verify_normative_measurements, _canonical,
+                       verify_independent_proofs, verify_normative_expectations,
+                       verify_normative_measurements, _canonical,
                        load_externally_approved_runner_policy, require_witness_key_isolation,
                        verify_sut_proc_identity, verify_immutable_sut_checkout,
                        materialize_synthetic_objects, require_preexisting_synthetic_sentinel,
@@ -233,7 +234,8 @@ def test_p01_normative_acceptance(approved_test_subprocess, ac_id, case):
             observations=verify_independent_proofs(required_case, {}, evidence, run,
                                       trusted_witness_key=witness_key,
                                       expected_git_sha=git_sha, expected_command_digest=run.command_digest,
-                                      expected_collector_sha256=collector_sha,\n                                      evaluate_expected=False)
+                                      expected_collector_sha256=collector_sha,
+                                      evaluate_expected=False)
             verify_execution_closure(evidence['execve_trace'].captures,
                                      approved_components_sha256=approved_components,
                                      process_pids=tuple(pids), monitor_public_key=monitor_key,

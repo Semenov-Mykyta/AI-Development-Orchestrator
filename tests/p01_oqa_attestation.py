@@ -368,6 +368,15 @@ def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
             sorted(endpoints)!=sorted(i['target'] for i in interfaces) or
             sorted(_canon(x) for x in recorded)!=sorted(_canon(x) for x in expected_events)):
         _deny('independent kernel events or signing interface inventory mismatch')
+    # A correctly signed event is not evidence unless the audit sensor was
+    # actively recording at the exact monotonic time of that event.
+    start, stop=signed.get('capture_started_ns'),signed.get('capture_stopped_ns')
+    if (type(start) is not int or type(stop) is not int or
+            any(not isinstance(event,dict) or
+                    type(event.get('timestamp_monotonic_ns')) is not int or
+                    not start <= event['timestamp_monotonic_ns'] <= stop
+                    for event in recorded)):
+        _deny('kernel audit capture window excludes a claimed syscall event')
     expected_source=('linux_audit_netlink_v1', 'kernel_syscall_events')
     if (signed.get('schema')!='aio.p01.oqa.kernel_audit.v1' or
             signed.get('audit_id')!=policy['oqa_kernel_audit_id'] or
@@ -377,7 +386,8 @@ def verify_oqa_receipt(response: dict, policy: dict, request: dict, *,
             signed.get('event_digest_set_sha256')!=_sha(_canon(digest_set)) or
             signed.get('source')!=expected_source[0] or
             signed.get('origin')!=expected_source[1] or
-            signed.get('event_loss_count')!=0 or
+            type(signed.get('event_loss_count')) is not int or
+            signed['event_loss_count']!=0 or
             signed.get('all_signing_endpoints_observed') is not True or
             signed.get('independent_of_attester_collector_sut') is not True or
             type(signed.get('capture_started_ns')) is not int or
