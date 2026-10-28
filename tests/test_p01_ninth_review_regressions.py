@@ -112,9 +112,12 @@ def test_042_complete_independent_exec_trace_positive_and_mutations():
 
 def test_041_pinned_python_exec_from_root_controlled_fd(tmp_path):
     from p01_probe import open_pinned_launch
-    interpreter=Path('/usr/bin/python3.13')
-    if not interpreter.exists(): pytest.skip('system python unavailable')
-    interpreter=interpreter.resolve()
+    # Pin the OS-owned system interpreter matching this test process.
+    # sys.executable may point into a writable virtualenv: never use it
+    # as a fallback for an approved FD-pinned runtime component.
+    interpreter=Path(f'/usr/bin/python{sys.version_info.major}.{sys.version_info.minor}')
+    assert interpreter.is_file(), 'approved system Python for this runtime is unavailable'
+    interpreter=interpreter.resolve(strict=True)
     script=tmp_path/'smoke.py';script.write_text('import sys;print("PINNED",sys.argv[1])\n')
     approved={str(interpreter):digest(interpreter),str(script):digest(script)}
     with open_pinned_launch([str(interpreter),str(script)],approved,

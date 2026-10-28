@@ -4,6 +4,7 @@ These validate the future runner/monitor contract, NOT a kernel audit deployment
 """
 import hashlib
 import os
+import sys
 from pathlib import Path
 import pytest
 
@@ -61,11 +62,15 @@ def test_043_parent_child_ancestry_requires_real_edges():
 def test_044_unreadable_pinned_script_rejected_as_not_checked(tmp_path):
     if os.geteuid()!=0: pytest.skip('OS uid isolation requires test-only root container')
     from p01_probe import require_pinned_script_access
-    import sys
     script=tmp_path/'script.py'
     script.write_text('pass\n'); script.chmod(0o600)
-    with open_pinned_launch([str(Path('/usr/bin/python3.13').resolve()),str(script)],
-                            {str(Path('/usr/bin/python3.13').resolve()):hashlib.sha256(Path('/usr/bin/python3.13').resolve().read_bytes()).hexdigest(),
+    # The tested binary must remain OS-owned; a venv sys.executable can be
+    # user-writable and must NOT satisfy the FD-pinning security boundary.
+    exe=Path(f'/usr/bin/python{sys.version_info.major}.{sys.version_info.minor}')
+    assert exe.is_file(), 'approved system Python for this runtime is unavailable'
+    exe=exe.resolve(strict=True)
+    with open_pinned_launch([str(exe),str(script)],
+                            {str(exe):hashlib.sha256(exe.read_bytes()).hexdigest(),
                              str(script):hashlib.sha256(script.read_bytes()).hexdigest()},
                             launch_mode='pinned_python_script') as launch:
         with pytest.raises(ProbeError,match='NOT_CHECKED'):
@@ -76,7 +81,9 @@ def test_044_readable_script_passes_access_preflight(tmp_path):
     if os.geteuid()!=0: pytest.skip('OS uid isolation requires test-only root container')
     from p01_probe import require_pinned_script_access
     script=tmp_path/'script.py';script.write_text('pass\n'); script.chmod(0o644)
-    exe=Path('/usr/bin/python3.13').resolve()
+    exe=Path(f'/usr/bin/python{sys.version_info.major}.{sys.version_info.minor}')
+    assert exe.is_file(), 'approved system Python for this runtime is unavailable'
+    exe=exe.resolve(strict=True)
     with open_pinned_launch([str(exe),str(script)],
                             {str(exe):hashlib.sha256(exe.read_bytes()).hexdigest(),
                              str(script):hashlib.sha256(script.read_bytes()).hexdigest()},
